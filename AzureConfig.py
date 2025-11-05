@@ -17,9 +17,10 @@ class AzureConfig:
     search_key: str
     # OpenAI
     openai_endpoint: str
+    openai_azure_api_key: str
+    openai_azure_embed_deployment: str
     openai_api_key: str
-    openai_embed_deployment: str
-    openai_chat_deployment: str | None = None  # optional
+    openai_azure_chat_deployment: str | None = None  # optional
 
     @staticmethod
     def from_env() -> "AzureConfig":
@@ -30,7 +31,8 @@ class AzureConfig:
             search_endpoint=os.getenv("AZURE_SEARCH_ENDPOINT", ""),
             search_key=os.getenv("AZURE_SEARCH_KEY", ""),
             openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
-            openai_api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
-            openai_chat_deployment=os.getenv("OPENAI_CHAT_MODEL"),
-            openai_embed_deployment=os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT", ""),
+            openai_azure_api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
+            openai_azure_embed_deployment=os.getenv("AZURE_OPENAI_EMBED_DEPLOYMENT", ""),
+            openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+            openai_azure_chat_deployment=os.getenv("OPENAI_CHAT_MODEL")
         )

@@ -29,8 +29,8 @@ class AzureHealth:
             cfg.search_endpoint,
             cfg.search_key,
             cfg.openai_endpoint,
-            cfg.openai_api_key,
-            cfg.openai_embed_deployment,
+            cfg.openai_azure_api_key,
+            cfg.openai_azure_embed_deployment,
         )):
             missing = [k for k, v in {
                 "AZURE_STORAGE_ACCOUNT": cfg.storage_account,
@@ -38,10 +38,10 @@ class AzureHealth:
                 "AZURE_SEARCH_ENDPOINT": cfg.search_endpoint,
                 "AZURE_SEARCH_KEY": cfg.search_key,
                 "AZURE_OPENAI_ENDPOINT": cfg.openai_endpoint,
-                "AZURE_OPENAI_API_KEY": cfg.openai_api_key,
-                "AZURE_OPENAI_EMBED_DEPLOYMENT": cfg.openai_embed_deployment,
+                "AZURE_OPENAI_API_KEY": cfg.openai_azure_api_key,
+                "AZURE_OPENAI_EMBED_DEPLOYMENT": cfg.openai_azure_embed_deployment,
                 "OPENAI_API_KEY": cfg.openai_api_key,
-                "OPENAI_CHAT_MODEL": cfg.openai_chat_deployment,
+                "OPENAI_CHAT_MODEL": cfg.openai_azure_chat_deployment,
             }.items() if not v]
             raise ValueError(f"Missing environment variables: {',  '.join(missing)}")
 
@@ -57,7 +57,7 @@ class AzureHealth:
 
         endpoint = cfg.openai_endpoint.rstrip("/")
         self.oai = AzureOpenAI(
-            api_key=cfg.openai_api_key,
+            api_key=cfg.openai_azure_api_key,
             api_version=API_VER,
             azure_endpoint=endpoint,
         )
@@ -97,10 +97,10 @@ class AzureHealth:
 
     def ping_openai_embedding(self) -> int:
         endpoint = self.cfg.openai_endpoint.rstrip("/")
-        dep = (self.cfg.openai_embed_deployment or "").strip()
+        dep = (self.cfg.openai_azure_embed_deployment or "").strip()
         url = f"{endpoint}/openai/deployments/{dep}/embeddings?api-version={API_VER}"
         body = {"input": "IFU smoke test"}
-        headers = {"api-key": self.cfg.openai_api_key, "Content-Type": "application/json"}
+        headers = {"api-key": self.cfg.openai_azure_api_key, "Content-Type": "application/json"}
         r = requests.post(url, headers=headers, json=body, timeout=30)
         if r.status_code != 200:
             raise RuntimeError(f"Embeddings ping failed: {r.status_code} {r.text[:300]}")
@@ -109,7 +109,7 @@ class AzureHealth:
         return len(emb)
 
     def check_openai_embeddings(self) -> int:
-        dep = (self.cfg.openai_embed_deployment or "").strip()
+        dep = (self.cfg.openai_azure_embed_deployment or "").strip()
         print("AOAI endpoint:", self.cfg.openai_endpoint)
         print("AOAI embed deployment (from .env):", dep)
         deployments = self.list_openai_deployments()
@@ -128,7 +128,7 @@ class AzureHealth:
         Generates an embedding for the given text and stores it locally under `label`.
         Returns (label, vector_length)
         """
-        dep = (self.cfg.openai_embed_deployment or "").strip()
+        dep = (self.cfg.openai_azure_embed_deployment or "").strip()
         vec = self.oai.embeddings.create(input=text, model=dep).data[0].embedding
         self._embeddings[label] = np.array(vec, dtype=np.float32)
         print(f"✅ Added embedding '{label}' (dim={len(vec)})")
@@ -143,7 +143,7 @@ class AzureHealth:
         import requests, json
 
         endpoint = self.cfg.openai_endpoint.rstrip("/")
-        key = self.cfg.openai_api_key
+        key = self.cfg.openai_azure_api_key
 
         api_versions = [
             "2024-10-21",
@@ -195,7 +195,7 @@ class AzureHealth:
 
     # ---------------- Optional chat ---------------- #
     def check_openai_chat(self) -> str:
-        dep = (self.cfg.openai_chat_deployment or "").strip()
+        dep = (self.cfg.openai_azure_chat_deployment or "").strip()
         if not dep:
             return "chat deployment not set"
         print("AOAI chat deployment:", dep)
