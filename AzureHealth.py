@@ -26,8 +26,6 @@ class AzureHealth:
         if not all((
             cfg.storage_account,
             cfg.storage_key,
-            cfg.search_endpoint,
-            cfg.search_key,
             cfg.openai_endpoint,
             cfg.openai_azure_api_key,
             cfg.openai_azure_embed_deployment,
@@ -35,13 +33,10 @@ class AzureHealth:
             missing = [k for k, v in {
                 "AZURE_STORAGE_ACCOUNT": cfg.storage_account,
                 "AZURE_STORAGE_KEY": cfg.storage_key,
-                "AZURE_SEARCH_ENDPOINT": cfg.search_endpoint,
-                "AZURE_SEARCH_KEY": cfg.search_key,
                 "AZURE_OPENAI_ENDPOINT": cfg.openai_endpoint,
                 "AZURE_OPENAI_API_KEY": cfg.openai_azure_api_key,
                 "AZURE_OPENAI_EMBED_DEPLOYMENT": cfg.openai_azure_embed_deployment,
                 "OPENAI_API_KEY": cfg.openai_api_key,
-                "OPENAI_CHAT_MODEL": cfg.openai_azure_chat_deployment,
             }.items() if not v]
             raise ValueError(f"Missing environment variables: {',  '.join(missing)}")
 

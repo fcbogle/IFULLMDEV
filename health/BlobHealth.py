@@ -4,44 +4,79 @@
 # Description: Tests the health of basic Blob connectivity
 # -----------------------------------------------------------------------------
 import uuid
+import logging
+
 
 from azure.core.credentials import AzureNamedKeyCredential
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
+from utility.logging_utils import get_logger
 
 from AzureConfig import AzureConfig
 
 
+
 class BlobHealth:
-    def __init__(self, cfg: AzureConfig):
+    def __init__(self, cfg: AzureConfig, logger: logging.Logger | None = None):
         self.cfg = cfg
+        self.logger = logger or get_logger(__name__)
+
         endpoint = f"https://{cfg.storage_account}.blob.core.windows.net"
+        self.logger.info("Initialising BlobHealth with endpoint: %s", endpoint)
+
         self.client = BlobServiceClient(
             account_url=endpoint,
             credential=AzureNamedKeyCredential(cfg.storage_account, cfg.storage_key),
         )
 
     def check_blob(self) -> bool:
+        """
+        Simple healthcheck:
+          1. Ensures a 'healthcheck' container exists
+          2. Uploads a small blob
+          3. Downloads it again and compares bytes
+        """
         container = "healthcheck"
         cc = self.client.get_container_client(container)
+
+        # Ensure container exists
         try:
             cc.create_container()
+            self.logger.info("Created container '%s' for healthcheck", container)
         except ResourceExistsError:
-            pass
+            self.logger.debug("Container '%s' already exists", container)
 
+        # Prepare test payload
         data = b"ping"
         name = f"ping_{uuid.uuid4().hex[:8]}.txt"
-        print(f"Uploading blob '{name}' with content: {data}")
-        print(f"Raw byte values uploaded: {[b for b in data]}")
+
+        self.logger.info("Uploading blob '%s' with content bytes=%s", name, list(data))
+
         bc = self.client.get_blob_client(container, name)
         bc.upload_blob(data, overwrite=True)
+
         downloaded = bc.download_blob().readall()
-        print(f"Raw byte values returned: {[b for b in downloaded]}")
-        return bc.download_blob().readall() == data
+        self.logger.info(
+            "Downloaded blob '%s' with content bytes=%s", name, list(downloaded)
+        )
+
+        ok = downloaded == data
+        if ok:
+            self.logger.info("Blob healthcheck PASSED for blob '%s'", name)
+        else:
+            self.logger.error("Blob healthcheck FAILED for blob '%s'", name)
+
+        return ok
+
 
 if __name__ == "__main__":
     # simple tests prior to orchestration
+    import logging
+
+    logging.basicConfig(level=logging.INFO)
+
     cfg = AzureConfig.from_env()
-    bh = BlobHealth(cfg)
+    logger = get_logger(__name__)
+    bh = BlobHealth(cfg, logger=logger)
     ok = bh.check_blob()
-    print("BlobHealth.check_blob() -> ", ok)
+    logger.info("BlobHealth.check_blob() -> %s", ok)
