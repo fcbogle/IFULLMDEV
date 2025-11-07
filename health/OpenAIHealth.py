@@ -3,6 +3,7 @@
 # Created: 2025-11-06
 # Description: OpenAIHealth
 # -----------------------------------------------------------------------------
+
 import time
 import logging
 from typing import Optional
@@ -40,7 +41,6 @@ class OpenAIHealth:
         )
         self.logger.info("Configured model: %s", self.model)
 
-    # -------------------------------------------------------------------------
     def get_service_info(self) -> dict:
         """
         Returns metadata about the OpenAI chat configuration.
@@ -56,7 +56,6 @@ class OpenAIHealth:
         self.logger.info("Service info: %s", info)
         return info
 
-    # -------------------------------------------------------------------------
     def run(self) -> bool:
         """
         Run a standard OpenAI Chat smoke test.
@@ -107,7 +106,6 @@ class OpenAIHealth:
             self.logger.exception("OpenAI Chat healthcheck FAILED: %s", e)
             return False
 
-    # -------------------------------------------------------------------------
     def run_heavy_test(self, paragraphs: int = 20, max_tokens: int = 512) -> bool:
         """
         Heavier test to consume more tokens and verify usage metering.
@@ -175,8 +173,6 @@ class OpenAIHealth:
             self.logger.exception("OpenAI heavy test FAILED: %s", e)
             return False
 
-
-# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     cfg = AzureConfig.from_env()
