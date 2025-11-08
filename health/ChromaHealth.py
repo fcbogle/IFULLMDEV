@@ -10,8 +10,6 @@ from utility.logging_utils import get_class_logger
 import chromadb
 
 from AzureConfig import AzureConfig
-from utility.logging_utils import get_logger  # adjust if this lives in another package
-
 
 class ChromaHealth:
     """

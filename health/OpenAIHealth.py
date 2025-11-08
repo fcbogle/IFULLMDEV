@@ -10,7 +10,7 @@ from typing import Optional
 
 from openai import OpenAI
 from AzureConfig import AzureConfig
-from utility.logging_utils import get_class_logger  # adjust if this lives in another package
+from utility.logging_utils import get_class_logger
 
 
 class OpenAIHealth:
