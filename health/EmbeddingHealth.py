@@ -8,7 +8,7 @@ import logging
 from typing import Optional
 from openai import AzureOpenAI
 from AzureConfig import AzureConfig
-from utility.logging_utils import get_logger  # adjust import path if needed
+from utility.logging_utils import get_class_logger
 
 
 class EmbeddingHealth:
@@ -29,7 +29,7 @@ class EmbeddingHealth:
     ):
         self.cfg = cfg
         self.expected_dim = expected_dim
-        self.logger = logger or get_logger(__name__)
+        self.logger = logger or get_class_logger(self.__class__)
 
         self.logger.info(
             "Initialising EmbeddingHealth with model deployment: %s",

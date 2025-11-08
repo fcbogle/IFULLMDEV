@@ -10,7 +10,7 @@ import logging
 from typing import Dict, Optional
 
 from AzureConfig import AzureConfig
-from utility.logging_utils import get_logger
+from utility.logging_utils import get_class_logger
 
 from health.BlobHealth import BlobHealth
 from health.ChromaHealth import ChromaHealth
@@ -31,19 +31,18 @@ class TestRunner:
 
     def __init__(self, cfg: AzureConfig, logger: Optional[logging.Logger] = None):
         self.cfg = cfg
-        self.logger = logger or get_logger(__name__)
+        self.logger = logger or get_class_logger(self.__class__)
 
         self.logger.info("Initialising SmokeTestRunner")
 
         # Instantiate individual health check classes
-        self.blob_health = BlobHealth(cfg, logger=self.logger)
-        self.chroma_health = ChromaHealth(cfg, logger=self.logger)
+        self.blob_health = BlobHealth(cfg)
+        self.chroma_health = ChromaHealth(cfg)
         self.embedding_health = EmbeddingHealth(
             cfg,
             expected_dim=3072,  # adjust if your embedding model differs
-            logger=self.logger,
         )
-        self.openai_health = OpenAIHealth(cfg, logger=self.logger)
+        self.openai_health = OpenAIHealth(cfg)
 
     # -------------------------------------------------------------------------
     def run_all(self, run_heavy_openai: bool = False) -> Dict[str, bool]:

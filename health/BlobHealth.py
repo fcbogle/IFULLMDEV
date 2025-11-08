@@ -10,7 +10,7 @@ import logging
 from azure.core.credentials import AzureNamedKeyCredential
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
-from utility.logging_utils import get_logger
+from utility.logging_utils import get_class_logger
 
 from AzureConfig import AzureConfig
 
@@ -19,7 +19,7 @@ from AzureConfig import AzureConfig
 class BlobHealth:
     def __init__(self, cfg: AzureConfig, logger: logging.Logger | None = None):
         self.cfg = cfg
-        self.logger = logger or get_logger(__name__)
+        self.logger = logger or get_class_logger(self.__class__)
 
         endpoint = f"https://{cfg.storage_account}.blob.core.windows.net"
         self.logger.info("Initialising BlobHealth with endpoint: %s", endpoint)

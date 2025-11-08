@@ -6,7 +6,7 @@
 
 from typing import List, Optional
 import logging
-
+from utility.logging_utils import get_class_logger
 import chromadb
 
 from AzureConfig import AzureConfig
@@ -24,7 +24,7 @@ class ChromaHealth:
 
     def __init__(self, cfg: AzureConfig, logger: Optional[logging.Logger] = None):
         self.cfg = cfg
-        self.logger = logger or get_logger(__name__)
+        self.logger = logger or get_class_logger(self.__class__)
 
         self.logger.info(
             "Initialising ChromaHealth with tenant=%s, database=%s",

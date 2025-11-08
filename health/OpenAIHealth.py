@@ -10,7 +10,7 @@ from typing import Optional
 
 from openai import OpenAI
 from AzureConfig import AzureConfig
-from utility.logging_utils import get_logger  # adjust if this lives in another package
+from utility.logging_utils import get_class_logger  # adjust if this lives in another package
 
 
 class OpenAIHealth:
@@ -20,7 +20,7 @@ class OpenAIHealth:
 
     def __init__(self, cfg: AzureConfig, model_override: Optional[str] = None, logger: Optional[logging.Logger] = None):
         self.cfg = cfg
-        self.logger = logger or get_logger(__name__)
+        self.logger = logger or get_class_logger(self.__class__)
 
         base_url = getattr(cfg, "openai_base_url", None)
         if base_url:
