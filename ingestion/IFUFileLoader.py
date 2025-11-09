@@ -6,10 +6,11 @@
 
 import logging
 import time
+from pathlib import Path
 from typing import List
 from azure.storage.blob import BlobServiceClient
 from azure.core.credentials import AzureNamedKeyCredential
-from azure.core.exceptions import ResourceNotFoundError, AzureError
+from azure.core.exceptions import ResourceNotFoundError, AzureError, ResourceExistsError
 
 from utility.logging_utils import get_class_logger
 from config import Config  # or Config if renamed
@@ -130,5 +131,88 @@ class IFUFileLoader:
             elapsed = (time.time() - start_time) * 1000.0
             self.logger.exception(
                 "Unexpected error in load_document after %.1f ms: %s", elapsed, e
+            )
+            raise
+
+    def upload_document_from_path(
+            self,
+            local_path: str | Path,
+            container: str = "ifudocs",
+            blob_name: str | None = None,
+    ) -> str:
+        """
+        Upload a local file to Azure Blob Storage.
+
+        Args:
+            local_path: Path to the local file on disk.
+            container: Target container name in Blob Storage.
+            blob_name: Optional name for the blob; if not provided,
+                       the local file name is used.
+
+        Returns:
+            The blob name used for the uploaded file.
+        """
+        start_time = time.time()
+
+        path_obj = Path(local_path)
+        if not path_obj.is_file():
+            self.logger.error("Local file not found: %s", path_obj)
+            raise FileNotFoundError(f"Local file not found: {path_obj}")
+
+        if blob_name is None:
+            blob_name = path_obj.name
+
+        file_size = path_obj.stat().st_size
+
+        try:
+            self.logger.info(
+                "Uploading local file '%s' (%d bytes) to container '%s' as blob '%s'...",
+                path_obj,
+                file_size,
+                container,
+                blob_name,
+            )
+
+            container_client = self.blob_service.get_container_client(container)
+            try:
+                container_client.create_container()
+                self.logger.info("Created container '%s' for upload.", container)
+            except ResourceExistsError:
+                self.logger.debug("Container '%s' already exists.", container)
+
+            blob_client = container_client.get_blob_client(blob_name)
+
+            with path_obj.open("rb") as f:
+                blob_client.upload_blob(f, overwrite=True)
+
+            elapsed = (time.time() - start_time) * 1000.0
+            self.logger.info(
+                "Uploaded '%s' to '%s/%s' (%d bytes) in %.1f ms",
+                path_obj,
+                container,
+                blob_name,
+                file_size,
+                elapsed,
+            )
+
+            return blob_name
+
+        except AzureError as e:
+            elapsed = (time.time() - start_time) * 1000.0
+            self.logger.exception(
+                "Azure error while uploading '%s' to '%s/%s' after %.1f ms: %s",
+                path_obj,
+                container,
+                blob_name,
+                elapsed,
+                e,
+            )
+            raise
+        except Exception as e:
+            elapsed = (time.time() - start_time) * 1000.0
+            self.logger.exception(
+                "Unexpected error in upload_document_from_path after %.1f ms: %s",
+                elapsed,
+                e,
             )
             raise
