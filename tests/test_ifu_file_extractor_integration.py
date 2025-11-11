@@ -13,8 +13,7 @@ import pytest
 
 from Config import Config
 from IFUFileLoader import IFUFileLoader
-from IFUTextExtractor import IFUTextExtractor
-from utility.logging_utils import get_class_logger
+from extractor.IFUTextExtractor import IFUTextExtractor
 
 
 @pytest.mark.integration
