@@ -3,6 +3,7 @@
 # Created: 2025-11-09
 # Description: test_ifu_file_extractor_integration.py
 # -----------------------------------------------------------------------------
+import hashlib
 import os
 import uuid
 import fitz
@@ -24,6 +25,7 @@ def test_text_reading_named_pdf():
         - Upload a local IFU PDF from path to Azure Blob Storage
         - Load the PDF back from Blob
         - Extract text using IFUTextExtractor
+        - Compare MD5 hash of source PDF and blob contents
         - Delete the test blob from Blob Storage
     """
     cfg = Config.from_env()
@@ -63,6 +65,16 @@ def test_text_reading_named_pdf():
     assert isinstance(downloaded_bytes, (bytes, bytearray))
     assert len(downloaded_bytes) > 0
     print(f"Downloaded blob ({len(downloaded_bytes)} bytes)")
+
+    # Compute MD5 hashes of source PDF and downloaded blob and compare
+    local_hash = hashlib.md5(local_pdf_path.read_bytes()).hexdigest()
+    blob_hash = hashlib.md5(downloaded_bytes).hexdigest()
+
+    print(f"Local MD5: {local_hash}")
+    print(f"Blob  MD5: {blob_hash}")
+
+    assert local_hash == blob_hash, "Uploaded and downloaded PDFs differ in content!"
+    print("PDF byte-for-byte match verified via MD5 hash comparison")
 
     # Extract text using IFUTextExtractor
     text = extractor.extract_text_from_pdf(downloaded_bytes)
