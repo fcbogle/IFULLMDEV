@@ -4,43 +4,59 @@
 # Description: IFUChunker
 # -----------------------------------------------------------------------------
 import uuid
-from typing import List, Callable, Dict, Any, Optional
+from typing import List, Callable, Dict, Any, Optional, Tuple
 
-from IFUChunk import IFUChunk
+from chunking.IFUChunk import IFUChunk
+
+
+# from .ifu_chunk import IFUChunk  # adjust to your path
 
 
 class IFUChunker:
     """
-        Splits IFU documents into language-aware IFUChunk objects.
-        Requires a utility class to extract page texts from PDF bytes.
+    Splits IFU documents into language-aware IFUChunk objects.
+    Expects `pages` to be List[str] (page 1 = pages[0]).
     """
 
-    def __init__(self,
-                 tokenizer: Callable[[str], List[str]],
-                 lang_detector,
-                 chunk_size_tokens: int = 800,
-                 overlap_tokens: int = 100,
-                 ):
+    def __init__(
+        self,
+        tokenizer: Callable[[str], List[str]],
+        lang_detector,
+        chunk_size_tokens: int = 300,
+        overlap_tokens: int = 100,
+        page_fallback_threshold: float = 0.65,   # if chunk conf < threshold, use page lang
+    ):
         """
         :param tokenizer: function(text) -> List[str]
-                          e.g. lambda s: s.split() or a tiktoken-based tokenizer.
-        :param lang_detector: object with:
-                              detect(text: str) -> (lang: str, confidence: float, script: Optional[str])
-        :param chunk_size_tokens: target number of tokens per chunk
-        :param overlap_tokens: number of tokens to overlap between consecutive chunks
+        :param lang_detector: has detect(text[, fallback]) -> (lang:str, confidence:float, script:Optional[str])
+        :param chunk_size_tokens: tokens per chunk
+        :param overlap_tokens: tokens overlapping between chunks
+        :param page_fallback_threshold: min chunk confidence before falling back to page language
         """
         self.tokenizer = tokenizer
         self.lang_detector = lang_detector
         self.chunk_size_tokens = chunk_size_tokens
         self.overlap_tokens = overlap_tokens
+        self.page_fallback_threshold = page_fallback_threshold
+
+    # --- internal helper so we work with detectors w/ or w/o fallback kwarg ---
+    def _detect_with_optional_fallback(
+        self, text: str, page_text: Optional[str] = None
+    ) -> Tuple[str, float, Optional[str]]:
+        try:
+            # Try detector that supports fallback keyword
+            return self.lang_detector.detect(text, fallback=page_text)  # type: ignore[arg-type]
+        except TypeError:
+            # Fallback to simple signature
+            return self.lang_detector.detect(text)
 
     def chunk_document(
-            self,
-            doc_id: str,
-            doc_name: str,
-            pages: List[str],
-            doc_metadata: Optional[Dict[str, Any]] = None,
-    ) -> List[IFUChunk]:
+        self,
+        doc_id: str,
+        doc_name: str,
+        pages: List[str],
+        doc_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List["IFUChunk"]:
         if doc_metadata is None:
             doc_metadata = {}
 
@@ -48,10 +64,19 @@ class IFUChunker:
         region = doc_metadata.get("region")
         is_primary_language = doc_metadata.get("is_primary_language", False)
 
-        chunks: List[IFUChunk] = []
+        # Basic sanity checks (helpful in integration tests)
+        if not isinstance(pages, list) or not all(isinstance(p, str) for p in pages):
+            raise TypeError("`pages` must be List[str] with one entry per PDF page.")
+
+        chunks: List["IFUChunk"] = []
         char_offset = 0  # approximate character offset in full document
 
         for page_index, page_text in enumerate(pages, start=1):
+            # 1) Detect language at the PAGE level (for fallback)
+            page_lang, page_confidence, page_script = self._detect_with_optional_fallback(
+                page_text, page_text
+            )
+
             tokens = self.tokenizer(page_text)
             num_tokens = len(tokens)
 
@@ -61,14 +86,21 @@ class IFUChunker:
                 window_tokens = tokens[start_idx:end_idx]
                 chunk_text = " ".join(window_tokens)
 
-                # Language detection for this chunk
-                lang, lang_confidence, script = self.lang_detector.detect(chunk_text)
+                # 2) Detect language at the CHUNK level, with page fallback support
+                lang, lang_confidence, script = self._detect_with_optional_fallback(
+                    chunk_text, page_text
+                )
 
-                # Approximate char positions (good enough for traceability)
+                # 3) Enforce page-level fallback if chunk detection is weak/undetermined
+                if (lang == "und" or lang_confidence < self.page_fallback_threshold) and page_lang != "und":
+                    lang, lang_confidence, script = page_lang, page_confidence, page_script
+
+                # 4) Approximate char positions (good enough for traceability)
                 chars_before = " ".join(tokens[:start_idx])
                 chunk_char_start = char_offset + len(chars_before)
                 chunk_char_end = chunk_char_start + len(chunk_text)
 
+                # 5) Build IFUChunk
                 chunk = IFUChunk(
                     chunk_id=str(uuid.uuid4()),
                     doc_id=doc_id,
@@ -83,9 +115,9 @@ class IFUChunker:
                     script=script,
                     version=version,
                     region=region,
-                    section_type=None,  # you can set this later
+                    section_type=None,           # set later if you have section tagging
                     is_primary_language=is_primary_language,
-                    translation_group_id=None,  # you can set this later too
+                    translation_group_id=None,   # set later if you align translations
                 )
 
                 # Optionally propagate all doc-level metadata into chunk.metadata
@@ -96,11 +128,13 @@ class IFUChunker:
 
                 if end_idx == num_tokens:
                     break
-
-                # Slide window forward with overlap
+                # Slide window with overlap
                 start_idx = end_idx - self.overlap_tokens
 
             # Move global char offset by this page's length (+1 as separator)
             char_offset += len(page_text) + 1
 
         return chunks
+
+
+

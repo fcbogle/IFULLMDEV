@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from Config import Config
-from IFUFileLoader import IFUFileLoader
+from config.Config import Config
+from ingestion.IFUFileLoader import IFUFileLoader
 from extractor.IFUTextExtractor import IFUTextExtractor
 
 
