@@ -76,9 +76,26 @@ def test_text_reading_named_pdf():
     print("PDF byte-for-byte match verified via MD5 hash comparison")
 
     # Extract text using IFUTextExtractor
-    text = extractor.extract_text_from_pdf(downloaded_bytes)
-    assert isinstance(text, str)
-    assert len(text.strip()) > 0
+    pages = extractor.extract_text_from_pdf(downloaded_bytes)
+
+    # validation
+    assert isinstance(pages, list), f"Expected List[str], got {type(pages).__name__}"
+    assert all(isinstance(p, str) for p in pages), "All page entries must be strings"
+    assert len(pages) > 0, "No pages extracted"
+    assert any(p.strip() for p in pages), "All extracted pages are empty!"
+
+    total_chars = sum(len(p.strip()) for p in pages)
+    print(f"Extracted {len(pages)} pages of text ({total_chars} total characters)")
+    print("[page 1 preview]", pages[0][:200].replace("\n", " "), "...")
+
+    pages = extractor.extract_text_from_pdf(downloaded_bytes)
+    assert isinstance(pages, list), f"Expected List[str], got {type(pages).__name__}"
+    assert all(isinstance(p, str) for p in pages), "All page entries must be strings"
+    assert len(pages) > 0, "No pages extracted"
+
+    print(f"Extracted {len(pages)} pages")
+    print("[p1 preview]", pages[0][:200].replace("\n", " "), "...")
+
 
     # Open the PDF again (from bytes) to count pages and first 200 chars of each page
     with fitz.open(stream=downloaded_bytes, filetype="pdf") as doc:

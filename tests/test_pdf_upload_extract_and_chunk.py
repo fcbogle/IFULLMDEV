@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-
+import pandas as pd
 from config.Config import Config
 from chunking.IFUChunker import IFUChunker
 from ingestion.IFUFileLoader import IFUFileLoader
@@ -103,6 +103,7 @@ def test_pdf_upload_extract_and_chunk():
     hash_short = hashlib.md5(downloaded_bytes).hexdigest()[:8]
     doc_id = f"{local_pdf_path.stem}_{hash_short}"  # e.g. BMK2IFU_9f84c7a2
     doc_name = local_pdf_path.name  # or use blob_name if you prefer
+
     doc_metadata = {
         "version": "Unknown",
         "region": "Unknown",
@@ -115,6 +116,42 @@ def test_pdf_upload_extract_and_chunk():
         pages=pages,
         doc_metadata=doc_metadata,
     )
+
+    # Use pandas to print data about chunk metadata
+    df = pd.DataFrame([{
+        "chunk_id": c.chunk_id,
+        "doc_id": c.doc_id,
+        "doc_name": c.doc_name,
+        "page_start": c.page_start,
+        "page_end": c.page_end,
+        "lang": c.lang,
+        "lang_conf": float(getattr(c, "lang_confidence", 0.0)),
+        "char_start": c.char_start,
+        "char_end": c.char_end,
+        "version": getattr(c, "version", "Unknown"),
+        "region": getattr(c, "region", "Unknown"),
+        "text_preview": (
+            c.short_preview(100) if hasattr(c, "short_preview") else c.text[:100].replace("\n", " ") + "…"),
+    }for c in chunks])
+
+    print("\nChunk DataFrame (first 10 rows):")
+    print(df.head(10).to_string(index=False))
+
+    # Useful roll-ups
+    print("\nCounts by language:")
+    print(df["lang"].value_counts().to_string())
+
+    print("\nChunks per page (first 20):")
+    print(df.groupby("page_start").size().head(20).to_string())
+
+    # Optional: persist for offline inspection (ignored by git if you add to .gitignore)
+    out_dir = Path("artifacts");
+    out_dir.mkdir(exist_ok=True)
+    csv_path = out_dir / f"chunks_{doc_id}.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"\nSaved chunk summary → {csv_path}")
+
+    # inspect the chunks and create print basic statistics
 
     num_chunks = len(chunks)
     print(f"Chunking complete: {num_chunks} chunks created")
