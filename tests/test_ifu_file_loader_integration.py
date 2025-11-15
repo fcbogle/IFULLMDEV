@@ -12,14 +12,63 @@ import pytest
 from ingestion.IFUFileLoader import IFUFileLoader
 from config.Config import Config
 
+
+# ---------- Test prerequisites helpers ----------
+
+# Default to your known path; allow override with IFU_LOCAL_TEST_PDF
+DEFAULT_PDF = "/Users/frankbogle/Documents/ifu/BMK2IFU.pdf"
+TEST_PDF_PATH = Path(os.getenv("IFU_LOCAL_TEST_PDF", DEFAULT_PDF))
+
+
+def _missing_storage_env_vars() -> list[str]:
+    """
+    Check only the Azure Storage env vars needed for these tests.
+
+    We use Config.ENV_VARS to avoid duplicating env var names.
+    """
+    storage_env_names = [
+        Config.ENV_VARS["storage_account"],  # e.g. "AZURE_STORAGE_ACCOUNT"
+        Config.ENV_VARS["storage_key"],      # e.g. "AZURE_STORAGE_KEY"
+    ]
+    return [name for name in storage_env_names if not os.getenv(name)]
+
+
+def _skip_if_missing_storage():
+    """
+    Skip tests if required Azure Storage env vars are not set.
+    """
+    missing_storage = _missing_storage_env_vars()
+    if missing_storage:
+        pytest.skip(
+            f"Missing env vars for Azure Storage: {', '.join(missing_storage)}"
+        )
+
+
+def _skip_if_missing_storage_or_pdf():
+    """
+    Skip tests that require both:
+      - Azure Storage env vars
+      - a local IFU PDF file
+    """
+    _skip_if_missing_storage()
+
+    if not TEST_PDF_PATH.is_file():
+        pytest.skip(f"Local IFU PDF not found: {TEST_PDF_PATH}")
+
+
+# ---------- Integration tests ----------
+
+
 @pytest.mark.integration
 def test_list_documents_in_ifu_container():
     """
-        Basic integration test:
-        - Uses real AzureConfig.from_env()
-        - Calls list_documents() on the IFU container
-        - Asserts that we get back a list (can be empty).
+    Basic integration test:
+    - Uses real Config.from_env()
+    - Calls list_documents() on the IFU container
+    - Asserts that we get back a list (can be empty).
     """
+    _skip_if_missing_storage()
+
     cfg = Config.from_env()
     loader = IFUFileLoader(cfg)
 
@@ -40,10 +89,12 @@ def test_upload_and_download_round_trip(tmp_path):
     - List documents and ensure the blob name is present
     - Download it back and compare bytes
     """
+    _skip_if_missing_storage()
+
     cfg = Config.from_env()
     loader = IFUFileLoader(cfg)
 
-    container = "ifudocs"
+    container = os.getenv("IFU_BLOB_CONTAINER", "ifudocs")
 
     # Create a small local test file
     local_file = tmp_path / f"ifu_test_{uuid.uuid4().hex[:8]}.txt"
@@ -70,6 +121,7 @@ def test_upload_and_download_round_trip(tmp_path):
         # Don't fail the test just because cleanup failed
         pass
 
+
 @pytest.mark.integration
 def test_upload_named_pdf_round_trip():
     """
@@ -80,16 +132,16 @@ def test_upload_named_pdf_round_trip():
     - Downloads it back
     - Verifies byte-for-byte equality
     """
+    _skip_if_missing_storage_or_pdf()
 
     cfg = Config.from_env()
     loader = IFUFileLoader(cfg)
 
-    # Access file on local machine
-    local_pdf_path = Path("/Users/frankbogle/Documents/ifu/BMK2IFU.pdf")
-
+    # Access file on local machine (with override support)
+    local_pdf_path = TEST_PDF_PATH
     assert local_pdf_path.is_file(), f"Local PDF not found: {local_pdf_path}"
 
-    container = "ifudocs"
+    container = os.getenv("IFU_BLOB_CONTAINER", "ifudocs")
     blob_name = local_pdf_path.name
     file_size = local_pdf_path.stat().st_size
 

@@ -41,6 +41,66 @@ class IFUEmbedder:
         self.model = cfg.openai_azure_embed_deployment or "text-embedding-3-large"
         self.logger.info("OpenAI Azure Embedder initialized '{self.model}', dtype={self.out_dtype}")
 
+    def test_connection(self) -> bool:
+        """
+        Verifies that Azure OpenAI embedding service is reachable and the
+        configured deployment responds correctly.
+
+        Returns:
+            True if a minimal embedding request succeeds, otherwise False.
+        """
+        try:
+            # --------------------------
+            # Sanity check required config
+            # --------------------------
+            if not self.cfg.openai_azure_api_key:
+                self.logger.error("Azure OpenAI API key missing (AZURE_OPENAI_API_KEY)")
+                return False
+
+            if not self.cfg.openai_azure_endpoint:
+                self.logger.error("Azure OpenAI endpoint missing (AZURE_OPENAI_ENDPOINT)")
+                return False
+
+            if not self.cfg.openai_azure_embed_deployment:
+                self.logger.error("Azure OpenAI embedding deployment missing (AZURE_OPENAI_EMBED_DEPLOYMENT)")
+                return False
+
+            self.logger.debug(
+                f"Testing Azure OpenAI embedding connection: "
+                f"endpoint={self.cfg.openai_azure_endpoint}, "
+                f"deployment={self.cfg.openai_azure_embed_deployment}"
+            )
+
+            # --------------------------
+            # Issue minimal test request
+            # --------------------------
+            response = self.client.embeddings.create(
+                model=self.cfg.openai_azure_embed_deployment,
+                input=["connection test"]
+            )
+
+            if not hasattr(response, "data") or not response.data:
+                self.logger.error("Azure OpenAI returned an empty embedding response.")
+                return False
+
+            vec = response.data[0].embedding
+            if not vec or not isinstance(vec, list):
+                self.logger.error("Azure OpenAI embedding response contains no valid vector.")
+                return False
+
+            # --------------------------
+            # Optional: log dimensionality
+            # --------------------------
+            self.logger.info(
+                f"Azure OpenAI embedding connection OK "
+                f"(received vector dim={len(vec)})"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Azure OpenAI embedding connection failed: {e}")
+            return False
+
     def _init_client(self) -> None:
         """
         Tries classic AzureOpenAI(...) first; if the installed SDK signature

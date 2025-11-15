@@ -16,24 +16,67 @@ from ingestion.IFUFileLoader import IFUFileLoader
 from extractor.IFUTextExtractor import IFUTextExtractor
 
 
+# ---- Test prerequisites helpers ------------------------------------------------
+
+# Default to your known path; allow override with IFU_LOCAL_TEST_PDF
+DEFAULT_PDF = "/Users/frankbogle/Documents/ifu/BMK2IFU.pdf"
+TEST_PDF_PATH = Path(os.getenv("IFU_LOCAL_TEST_PDF", DEFAULT_PDF))
+
+
+def _missing_storage_env_vars() -> list[str]:
+    """
+    Check only the Azure Storage env vars needed for this test.
+
+    We use Config.ENV_VARS to avoid duplicating env var names.
+    """
+    storage_env_names = [
+        Config.ENV_VARS["storage_account"],  # e.g. "AZURE_STORAGE_ACCOUNT"
+        Config.ENV_VARS["storage_key"],      # e.g. "AZURE_STORAGE_KEY"
+    ]
+    return [name for name in storage_env_names if not os.getenv(name)]
+
+
+def _skip_if_missing_prereqs():
+    """
+    Skip integration test if:
+      - the local IFU PDF is not present
+      - required Azure Storage env vars are not set
+    """
+    if not TEST_PDF_PATH.is_file():
+        pytest.skip(f"Local IFU PDF not found: {TEST_PDF_PATH}")
+
+    missing_storage = _missing_storage_env_vars()
+    if missing_storage:
+        pytest.skip(
+            f"Missing env vars for Azure Storage: {', '.join(missing_storage)}"
+        )
+
+
+# ---- Integration test ----------------------------------------------------------
+
+
 @pytest.mark.integration
 def test_text_reading_named_pdf():
     """
-        End-to-end integration test:
+    End-to-end integration test:
 
-        - Upload a local IFU PDF from path to Azure Blob Storage
-        - Load the PDF back from Blob
-        - Extract text using IFUTextExtractor
-        - Compare MD5 hash of source PDF and blob contents
-        - Delete the test blob from Blob Storage
+    - Upload a local IFU PDF from path to Azure Blob Storage
+    - Load the PDF back from Blob
+    - Extract text using IFUTextExtractor
+    - Compare MD5 hash of source PDF and blob contents
+    - Delete the test blob from Blob Storage
     """
+    _skip_if_missing_prereqs()
+
+    # Build config – NOTE: with current Config.__post_init__, *all* fields
+    # must be present, not just storage. If that's too strict, consider
+    # relaxing __post_init__ or adding a dedicated validate_storage() method.
     cfg = Config.from_env()
+
     loader = IFUFileLoader(cfg)
     extractor = IFUTextExtractor()
 
-    # Upload pdf from local path
-    pdf_path = "/Users/frankbogle/Documents/ifu/BMK2IFU.pdf"
-    local_pdf_path = Path(os.getenv("IFU_LOCAL_TEST_PDF", pdf_path))
+    local_pdf_path = TEST_PDF_PATH
     assert local_pdf_path.is_file(), f"Local test PDF not found: {local_pdf_path}"
 
     container = os.getenv("IFU_BLOB_CONTAINER", "ifudocs")
@@ -88,15 +131,6 @@ def test_text_reading_named_pdf():
     print(f"Extracted {len(pages)} pages of text ({total_chars} total characters)")
     print("[page 1 preview]", pages[0][:200].replace("\n", " "), "...")
 
-    pages = extractor.extract_text_from_pdf(downloaded_bytes)
-    assert isinstance(pages, list), f"Expected List[str], got {type(pages).__name__}"
-    assert all(isinstance(p, str) for p in pages), "All page entries must be strings"
-    assert len(pages) > 0, "No pages extracted"
-
-    print(f"Extracted {len(pages)} pages")
-    print("[p1 preview]", pages[0][:200].replace("\n", " "), "...")
-
-
     # Open the PDF again (from bytes) to count pages and first 200 chars of each page
     with fitz.open(stream=downloaded_bytes, filetype="pdf") as doc:
         print(f"\nPDF has {doc.page_count} pages. Showing first 200 characters of each page:\n")
@@ -115,4 +149,5 @@ def test_text_reading_named_pdf():
         print(f"Deleted test blob '{uploaded_blob_name}' from container '{container}'")
     except Exception as e:
         print(f"Cleanup failed for blob '{uploaded_blob_name}': {e}")
+
 

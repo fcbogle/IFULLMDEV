@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import pandas as pd
+
 from config.Config import Config
 from chunking.IFUChunker import IFUChunker
 from ingestion.IFUFileLoader import IFUFileLoader
@@ -18,21 +19,66 @@ from chunking.LangDetectDetector import LangDetectDetector
 from extractor.IFUTextExtractor import IFUTextExtractor
 
 
+# ---------- Test prerequisites helpers ----------
+
+# Default to your known path; allow override with IFU_LOCAL_TEST_PDF
+DEFAULT_PDF = "/Users/frankbogle/Documents/ifu/BMK2IFU.pdf"
+TEST_PDF_PATH = Path(os.getenv("IFU_LOCAL_TEST_PDF", DEFAULT_PDF))
+
+
+def _missing_storage_env_vars() -> list[str]:
+    """
+    Check only the Azure Storage env vars needed for this test.
+
+    We use Config.ENV_VARS to avoid duplicating env var names.
+    """
+    storage_env_names = [
+        Config.ENV_VARS["storage_account"],  # e.g. "AZURE_STORAGE_ACCOUNT"
+        Config.ENV_VARS["storage_key"],      # e.g. "AZURE_STORAGE_KEY"
+    ]
+    return [name for name in storage_env_names if not os.getenv(name)]
+
+
+def _skip_if_missing_storage_or_pdf():
+    """
+    Skip this integration test if:
+      - required Azure Storage env vars are not set
+      - the local IFU PDF file is not present
+    """
+    missing_storage = _missing_storage_env_vars()
+    if missing_storage:
+        pytest.skip(
+            f"Missing env vars for Azure Storage: {', '.join(missing_storage)}"
+        )
+
+    if not TEST_PDF_PATH.is_file():
+        pytest.skip(f"Local IFU PDF not found: {TEST_PDF_PATH}")
+
+
+# ---------- Integration test ----------
+
+
 @pytest.mark.integration
 def test_pdf_upload_extract_and_chunk():
     """
-        Basic integration test:
-        - Uses real AzureConfig.from_env()
-        - Calls list_documents() on the IFU container
-        - Asserts that we get back a list (can be empty).
+    End-to-end integration test:
+
+    - Upload a local IFU PDF to Azure Blob Storage
+    - Download it back and verify bytes (MD5)
+    - Extract pages with IFUTextExtractor
+    - Chunk with IFUChunker + LangDetectDetector
+    - Save a CSV of chunk metadata and print some stats
     """
+    _skip_if_missing_storage_or_pdf()
+
+    # NOTE: with the current Config.__post_init__, *all* env vars used by Config
+    # must be present (storage + OpenAI + Chroma). If that’s too strict, consider
+    # relaxing __post_init__ or adding a cfg.validate_storage() method.
     cfg = Config.from_env()
     loader = IFUFileLoader(cfg)
-    # pdf_extractor = PDFPageExtractor()
     pdf_extractor = IFUTextExtractor()
 
-    pdf_path = "/Users/frankbogle/Documents/ifu/BMK2IFU.pdf"
-    local_pdf_path = Path(os.getenv("IFU_LOCAL_TEST_PDF", pdf_path))
+    local_pdf_path = TEST_PDF_PATH
     assert local_pdf_path.is_file(), f"Local test PDF not found: {local_pdf_path}"
 
     container = os.getenv("IFU_BLOB_CONTAINER", "ifudocs")
@@ -87,8 +133,11 @@ def test_pdf_upload_extract_and_chunk():
     # Token counts per page
     token_counts = [len(tokenizer(p)) for p in pages]
     print(f"Pages: {len(pages)}")
-    print(f"Tokens per page → min={min(token_counts)}, max={max(token_counts)}, "
-          f"avg={sum(token_counts) / len(token_counts):.1f}")
+    print(
+        "Tokens per page → "
+        f"min={min(token_counts)}, max={max(token_counts)}, "
+        f"avg={sum(token_counts) / len(token_counts):.1f}"
+    )
     print("First 10 token counts:", token_counts[:10])
 
     # Chunking pages into language-aware IFUChunks
@@ -118,21 +167,29 @@ def test_pdf_upload_extract_and_chunk():
     )
 
     # Use pandas to print data about chunk metadata
-    df = pd.DataFrame([{
-        "chunk_id": c.chunk_id,
-        "doc_id": c.doc_id,
-        "doc_name": c.doc_name,
-        "page_start": c.page_start,
-        "page_end": c.page_end,
-        "lang": c.lang,
-        "lang_conf": float(getattr(c, "lang_confidence", 0.0)),
-        "char_start": c.char_start,
-        "char_end": c.char_end,
-        "version": getattr(c, "version", "Unknown"),
-        "region": getattr(c, "region", "Unknown"),
-        "text_preview": (
-            c.short_preview(100) if hasattr(c, "short_preview") else c.text[:100].replace("\n", " ") + "…"),
-    }for c in chunks])
+    df = pd.DataFrame(
+        [
+            {
+                "chunk_id": c.chunk_id,
+                "doc_id": c.doc_id,
+                "doc_name": c.doc_name,
+                "page_start": c.page_start,
+                "page_end": c.page_end,
+                "lang": c.lang,
+                "lang_conf": float(getattr(c, "lang_confidence", 0.0)),
+                "char_start": c.char_start,
+                "char_end": c.char_end,
+                "version": getattr(c, "version", "Unknown"),
+                "region": getattr(c, "region", "Unknown"),
+                "text_preview": (
+                    c.short_preview(100)
+                    if hasattr(c, "short_preview")
+                    else c.text[:100].replace("\n", " ") + "…"
+                ),
+            }
+            for c in chunks
+        ]
+    )
 
     print("\nChunk DataFrame (first 10 rows):")
     print(df.head(10).to_string(index=False))
@@ -144,25 +201,21 @@ def test_pdf_upload_extract_and_chunk():
     print("\nChunks per page (first 20):")
     print(df.groupby("page_start").size().head(20).to_string())
 
-    # Optional: persist for offline inspection (ignored by git if you add to .gitignore)
-    out_dir = Path("artifacts");
+    # Optional: persist for offline inspection (ignored by git if added to .gitignore)
+    out_dir = Path("artifacts")
     out_dir.mkdir(exist_ok=True)
     csv_path = out_dir / f"chunks_{doc_id}.csv"
     df.to_csv(csv_path, index=False)
     print(f"\nSaved chunk summary → {csv_path}")
 
-    # inspect the chunks and create print basic statistics
-
+    # Basic stats / assertions
     num_chunks = len(chunks)
     print(f"Chunking complete: {num_chunks} chunks created")
     assert num_chunks > 0, "No chunks created from pages"
 
-    # --- 5. Language distribution ---
     print("Calculating language distribution for chunks...")
     lang_counts = Counter(c.lang for c in chunks)
     for lang, count in lang_counts.items():
         print(f"   • {lang}: {count} chunks")
     print("Language analysis complete")
-
-
 
