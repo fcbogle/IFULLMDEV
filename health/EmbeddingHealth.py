@@ -7,7 +7,7 @@ import time
 import logging
 from typing import Optional
 from openai import AzureOpenAI
-from AzureConfig import AzureConfig
+from config.Config import Config
 from utility.logging_utils import get_class_logger
 
 
@@ -23,7 +23,7 @@ class EmbeddingHealth:
 
     def __init__(
         self,
-        cfg: AzureConfig,
+        cfg: Config,
         expected_dim: Optional[int] = None,
         logger: Optional[logging.Logger] = None,
     ):
@@ -103,7 +103,7 @@ if __name__ == "__main__":
     # Configure root logging (colour and line numbers handled by get_logger)
     logging.basicConfig(level=logging.INFO)
 
-    cfg = AzureConfig.from_env()
+    cfg = Config.from_env()
 
     # Expected dimensions for models:
     # - text-embedding-3-small → 1536
