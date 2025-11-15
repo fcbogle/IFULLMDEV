@@ -4,7 +4,7 @@
 # Description: IFUEmbedder
 # -----------------------------------------------------------------------------
 import time
-from typing import Optional, List, Iterable, Any
+from typing import Optional, List, Iterable, Any, Set
 
 import numpy as np
 from openai import AzureOpenAI, OpenAI
@@ -22,7 +22,7 @@ class IFUEmbedder:
             batch_size: int = 64,
             normalize: bool = True,
             out_dtype: str = "float32",
-            filter_lang: Optional[set[str]] = None,  # e.g., {"en"} to embed only English
+            filter_lang: Optional[Set[str]] = None,  # e.g., {"en"} to embed only English
             logger=None,
     ):
         self.cfg = cfg
@@ -32,12 +32,37 @@ class IFUEmbedder:
         self.filter_lang = filter_lang
         self.logger = logger or get_class_logger(self.__class__)
 
-        # Azure OpenAI client setup
-        self.client = AzureOpenAI(
-            api_key=cfg.openai_azure_api_key,
-            azure_endpoint=cfg.openai_azure_endpoint,
-            api_version="2024-10-21"
-        )
+        # This is the “model” argument we will pass to embeddings.create(...)
+        # For Azure, this is the *deployment name*
+        self.model = cfg.openai_azure_embed_deployment
+
+        # ------------------------------------------------------------------
+        # Client setup
+        # Priority: Azure OpenAI for embeddings; fallback to direct OpenAI.
+        # ------------------------------------------------------------------
+        if cfg.openai_azure_api_key and cfg.openai_azure_endpoint:
+            # Azure OpenAI client (modern SDK)
+            self.client = AzureOpenAI(
+                api_key=cfg.openai_azure_api_key,
+                azure_endpoint=cfg.openai_azure_endpoint,
+                api_version="2024-10-21",  # keep in sync with your Azure config
+            )
+            self.logger.info(
+                "IFUEmbedder using AzureOpenAI client "
+                f"(endpoint={cfg.openai_azure_endpoint}, deployment={self.model})"
+            )
+        else:
+            # Fallback: direct OpenAI (for local/testing, if you ever want that)
+            base_url = cfg.openai_base_url or "https://api.openai.com/v1"
+            self.client = OpenAI(
+                api_key=cfg.openai_api_key,
+                base_url=base_url,
+            )
+            self.logger.info(
+                "IFUEmbedder using OpenAI client "
+                f"(base_url={base_url}, model={self.model})"
+            )
+
         self.model = cfg.openai_azure_embed_deployment or "text-embedding-3-large"
         self.logger.info("OpenAI Azure Embedder initialized '{self.model}', dtype={self.out_dtype}")
 
@@ -133,13 +158,19 @@ class IFUEmbedder:
         self._use_deployment_param = False
 
     def _embed_batch(self, texts: List[str], *, max_retries: int = 5) -> np.ndarray:
+        """
+        Embed a batch of texts using the configured embedding model.
+
+        Returns:
+            np.ndarray of shape (batch_size, embedding_dim), dtype float32/float16.
+        """
         delay = 0.8
         for attempt in range(1, max_retries + 1):
             try:
-                if self._use_deployment_param:
-                    resp = self.client.embeddings.create(model=self.model, input=texts)
-                else:
-                    resp = self.client.embeddings.create(input=texts)
+                resp = self.client.embeddings.create(
+                    model=self.model,
+                    input=texts,
+                )
 
                 arr = np.asarray([d.embedding for d in resp.data], dtype=np.float32)
 
@@ -152,17 +183,26 @@ class IFUEmbedder:
                 if self.out_dtype == "float16":
                     arr = arr.astype(np.float16)
                 elif self.out_dtype != "float32":
-                    self.logger.warning(f"Unsupported out_dtype '{self.out_dtype}', defaulting to float32")
+                    self.logger.warning(
+                        "Unsupported out_dtype '%s', defaulting to float32",
+                        self.out_dtype,
+                    )
+
                 return arr
 
             except Exception as e:
-                self.logger.warning(f"Embedding batch failed (attempt {attempt}/{max_retries}): {e}")
+                self.logger.warning(
+                    "Embedding batch failed (attempt %d/%d): %s",
+                    attempt,
+                    max_retries,
+                    e,
+                )
                 if attempt == max_retries:
                     raise
                 time.sleep(delay)
                 delay *= 1.7  # backoff
 
-        # Unreachable and include for type checkers
+        # Unreachable and just here for type checkers
         return np.empty((0, 0), dtype=np.float32)
 
     def embed_chunks(self, chunks: Iterable[Any]) -> List[EmbeddingRecord]:
@@ -186,7 +226,7 @@ class IFUEmbedder:
             return out
 
         for i in range(0, total, self.batch_size):
-            batch = items[i:i+self.batch_size]
+            batch = items[i:i + self.batch_size]
             texts = [c.text for c in batch]
             try:
                 arr = self._embed_batch(texts)
