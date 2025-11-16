@@ -4,7 +4,7 @@
 # Description: IFUEmbedder
 # -----------------------------------------------------------------------------
 import time
-from typing import Optional, List, Iterable, Any, Set
+from typing import Optional, List, Iterable, Any, Set, Sequence
 
 import numpy as np
 from openai import AzureOpenAI, OpenAI
@@ -156,6 +156,34 @@ class IFUEmbedder:
             base_url=f"{endpoint}/openai/deployments/{self.model}",
         )
         self._use_deployment_param = False
+
+    def embed_texts(self, texts: Sequence[str]) -> List[List[float]]:
+        """
+        Embed arbitrary text strings using the same Azure model and settings
+        as embed_chunks, returning List[List[float]].
+        """
+        resp = self.client.embeddings.create(
+            model=self.model,
+            input=list(texts),
+        )
+
+        # Convert to numpy for optional normalization + dtype handling
+        vectors = np.array([d.embedding for d in resp.data], dtype="float32")
+
+        # Apply same normalization logic as for chunks
+        if getattr(self, "normalize", False):
+            norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            vectors = vectors / norms
+
+        # Respect out_dtype if you’re using it elsewhere
+        out_dtype = getattr(self, "out_dtype", None)
+        if out_dtype is not None:
+            # e.g. "float32", "float16", etc.
+            vectors = vectors.astype(out_dtype)
+
+        # Return plain Python list-of-lists for Chroma
+        return vectors.tolist()
 
     def _embed_batch(self, texts: List[str], *, max_retries: int = 5) -> np.ndarray:
         """

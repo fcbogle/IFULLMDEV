@@ -165,7 +165,7 @@ def test_embedder_on_example_ifu_pdf_multilang_chunks():
     for rec, chunk in zip(records, chunks):
         vec = rec.vector  # or rec.embedding depending on your class
         print(
-            f"{chunk.chunk_id} | {chunk.lang} | {len(chunk.text)} chars " f"| first dims: {vec[:10]}"
+            f"{chunk.chunk_id} | {chunk.lang} | {len(chunk.text)} | {len(rec.vector)}"
         )
 
 

@@ -3,52 +3,58 @@
 # Created: 2025-11-16
 # Description: ChromaIFUVectorStore
 # -----------------------------------------------------------------------------
-from typing import Sequence, Any
+from dataclasses import dataclass
+from typing import Sequence, Dict, Any, List
 
 import chromadb
+from chromadb import ClientAPI
+from chromadb.api.models import Collection
 
-from embedding.EmbeddingRecord import EmbeddingRecord
 from chunking.IFUChunk import IFUChunk
 from config.Config import Config
+from embedding.IFUEmbedder import EmbeddingRecord, IFUEmbedder
 from utility.logging_utils import get_class_logger
 from vectorstore.IFUVectorStore import IFUVectorStore
 
+
+@dataclass
 class ChromaIFUVectorStore(IFUVectorStore):
-    """
-        Chroma-backed implementation of IFUVectorStore.
-        Stores IFU chunk embeddings and metadata for semantic search over IFUs.
-    """
+    cfg: Config
+    embedder: IFUEmbedder  # ⬅️ new dependency
+    collection_name: str = "ifu_chunks"
+    logger: Any = None
 
-    def __init__(self, cfg: Config, collection_name: str = "ifu_chunks"):
-        self.cfg = cfg
-        self.logger = get_class_logger(self.__class__)
-
-        # Connect to ChromaDB
-        self.client = chromadb.HttpClient(
-            host=cfg.chroma_endpoint,
-            headers={"x-api-key": cfg.chroma_api_key} if cfg.chroma_api_key else None,
-        )
-
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            metadata={
-                "tenant": cfg.chroma_tenant,
-                "database": cfg.chroma_database,
-            },
-        )
+    def __post_init__(self) -> None:
+        self.logger = self.logger or get_class_logger(self.__class__)
 
         self.logger.info(
-            "ChromaIFUVectorStore initialised (collection=%s)", collection_name
+            "Initialising Chroma Cloud client "
+            f"(tenant={self.cfg.chroma_tenant}, database={self.cfg.chroma_database})"
         )
 
-    # Implement Protocol Methods
+        self.client: ClientAPI = chromadb.CloudClient(
+            tenant=self.cfg.chroma_tenant,
+            database=self.cfg.chroma_database,
+            api_key=self.cfg.chroma_api_key,
+        )
+
+        self.collection: Collection = self.client.get_or_create_collection(
+            name=self.collection_name
+        )
+        self.logger.info(
+            "Chroma collection ready: '%s' (tenant=%s, db=%s)",
+            self.collection_name,
+            self.cfg.chroma_tenant,
+            self.cfg.chroma_database,
+        )
+
     def test_connection(self) -> bool:
-        """Verify that the collection is reachable."""
+        """
+        Simple health check: can we talk to Chroma and our collection?
+        """
         try:
+            # count() is cheap and exercises the connection + auth
             _ = self.collection.count()
-            self.logger.info(
-                "Chroma collection '%s' is reachable", self.collection.name
-            )
             return True
         except Exception as e:
             self.logger.error("Chroma connection failed: %s", e)
@@ -56,76 +62,150 @@ class ChromaIFUVectorStore(IFUVectorStore):
 
     def upsert_chunk_embeddings(
             self,
+            doc_id: str,
             chunks: Sequence[IFUChunk],
             records: Sequence[EmbeddingRecord],
     ) -> None:
         if len(chunks) != len(records):
             raise ValueError(
-                f"Mismatch: {len(chunks)} chunks vs {len(records)} embedding records"
+                f"chunks ({len(chunks)}) and records ({len(records)}) length mismatch"
             )
 
-        ids = [c.chunk_id for c in chunks]
-        documents = [c.text for c in chunks]
+        ids: List[str] = []
+        documents: List[str] = []
+        embeddings: List[List[float]] = []
+        metadatas: List[Dict[str, Any]] = []
 
-        metadatas: list[dict[str, Any]] = [
-            {
-                "doc_id": c.doc_id,
-                "doc_name": c.doc_name,
-                "page_start": c.page_start,
-                "page_end": c.page_end,
-                "lang": c.lang,
-                "version": getattr(c, "version", None),
-                "region": getattr(c, "region", None),
-            }
-            for c in chunks
-        ]
+        for chunk, rec in zip(chunks, records):
+            # Optional safety check – catches accidental mismatches early
+            if getattr(chunk, "doc_id", doc_id) != doc_id:
+                raise ValueError(
+                    f"Chunk doc_id '{chunk.doc_id}' does not match upsert doc_id '{doc_id}'"
+                )
 
-        embeddings: list[list[float]] = []
-        for rec in records:
-            vec = rec.vector  # check EmbeddingRecord dataclass for attribute name
+            vec = rec.vector
             if hasattr(vec, "tolist"):
                 vec = vec.tolist()
-            embeddings.append(vec)
 
-        self.logger.info("Upserting %d embeddings to Chroma…", len(ids))
+            ids.append(chunk.chunk_id)
+            documents.append(chunk.text)
+            embeddings.append(vec)
+            metadatas.append({
+                "doc_id": doc_id,
+                "doc_name": chunk.doc_name,
+                "page_start": chunk.page_start,
+                "page_end": chunk.page_end,
+                "lang": chunk.lang,
+                "version": getattr(chunk, "version", None),
+                "region": getattr(chunk, "region", None),
+            })
 
         self.collection.upsert(
             ids=ids,
-            embeddings=embeddings,
             documents=documents,
+            embeddings=embeddings,
             metadatas=metadatas,
+        )
+        self.logger.info(
+            "Upserted %d chunks for doc_id '%s' into Chroma collection '%s'",
+            len(chunks),
+            doc_id,
+            self.collection_name,
         )
 
     def query_text(
             self,
-            query: str,
+            query_text: str,
             n_results: int = 5,
-            where: dict[str, Any] | None = None,
-    ) -> dict:
-        self.logger.debug(
-            "Querying Chroma: %r (n_results=%d, where=%s)",
-            query,
+            where: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        self.logger.info(
+            "Querying Chroma collection '%s' with: %r (n_results=%d, where=%s)",
+            self.collection_name,
+            query_text,
             n_results,
             where,
         )
 
-        return self.collection.query(
-            query_texts=[query],
-            n_results=n_results,
-            where=where,
-        )
+        # 1) Embed query with the same model as chunks
+        query_vectors = self.embedder.embed_texts([query_text])  # returns List[List[float]]
+
+        # 2) Build kwargs for Chroma
+        query_kwargs: Dict[str, Any] = {
+            "query_embeddings": query_vectors,
+            "n_results": n_results,
+        }
+        if where is not None:
+            query_kwargs["where"] = where
+
+        # 3) Query Chroma using precomputed embeddings
+        res = self.collection.query(**query_kwargs)
+        return res
 
     def delete_by_doc_id(self, doc_id: str) -> int:
-        """Delete all chunks for the given doc_id."""
-        res = self.collection.get(
-            where={"doc_id": doc_id},
-            include=["ids"],
+        """
+        Delete all chunks in this collection that belong to the given doc_id.
+        Returns the number of chunks actually deleted.
+        """
+        self.logger.info(
+            "Deleting all chunks for doc_id '%s' from collection '%s'",
+            doc_id,
+            self.collection_name,
         )
-        ids = res.get("ids", [])
+
+        # 1) Fetch all IDs for this doc_id (no embeddings, no NumResults quota)
+        try:
+            res: Dict[str, Any] = self.collection.get(
+                where={"doc_id": {"$eq": doc_id}},
+                include=[],  # we only care about ids
+            )
+        except Exception as e:
+            self.logger.error(
+                "Failed to get chunks for doc_id '%s' from collection '%s': %s",
+                doc_id,
+                self.collection_name,
+                e,
+            )
+            raise
+
+        ids: List[str] = res.get("ids", []) or []
         if not ids:
+            self.logger.info(
+                "No chunks found for doc_id '%s' in collection '%s'",
+                doc_id,
+                self.collection_name,
+            )
             return 0
 
-        self.logger.info("Deleting %d chunks for doc_id=%s", len(ids), doc_id)
-        self.collection.delete(ids=ids)
-        return len(ids)
+        # 2) Ensure IDs are unique (Chroma requires this)
+        # preserves order while de-duplicating
+        unique_ids = list(dict.fromkeys(ids))
+        if len(unique_ids) != len(ids):
+            self.logger.info(
+                "Found %d duplicate IDs for doc_id '%s'; deduping to %d IDs",
+                len(ids) - len(unique_ids),
+                doc_id,
+                len(unique_ids),
+            )
 
+        # 3) Delete those specific IDs
+        try:
+            self.collection.delete(ids=unique_ids)
+        except Exception as e:
+            self.logger.error(
+                "Failed to delete %d chunks for doc_id '%s' from collection '%s': %s",
+                len(unique_ids),
+                doc_id,
+                self.collection_name,
+                e,
+            )
+            raise
+
+        deleted_count = len(unique_ids)
+        self.logger.info(
+            "Deleted %d chunks for doc_id '%s' from collection '%s'",
+            deleted_count,
+            doc_id,
+            self.collection_name,
+        )
+        return deleted_count
