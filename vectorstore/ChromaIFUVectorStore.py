@@ -134,6 +134,7 @@ class ChromaIFUVectorStore(IFUVectorStore):
         query_kwargs: Dict[str, Any] = {
             "query_embeddings": query_vectors,
             "n_results": n_results,
+            "include": ["documents", "metadatas", "distances"],
         }
         if where is not None:
             query_kwargs["where"] = where

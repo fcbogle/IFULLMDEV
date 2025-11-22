@@ -14,6 +14,9 @@ load_dotenv(find_dotenv(usecwd=True), override=True)
 
 @dataclass(frozen=True)
 class Config:
+    # IFU Sample PDF
+    ifu_sample_pdf: str
+
     # Azure Storage
     storage_account: str
     storage_key: str
@@ -21,6 +24,7 @@ class Config:
     # OpenAI (direct, for chat)
     openai_base_url: str
     openai_api_key: str
+    openai_chat_model: str
 
     # Azure OpenAI (for embeddings, and possibly chat if you add it later)
     openai_azure_api_key: str
@@ -35,6 +39,9 @@ class Config:
 
     # ---- Single source of truth: field_name -> ENV VAR NAME ----
     ENV_VARS = {
+        # IFU Sample PDF
+        "ifu_sample_pdf": "IFU_SAMPLE_PDF",
+
         # Storage
         "storage_account": "AZURE_STORAGE_ACCOUNT",
         "storage_key": "AZURE_STORAGE_KEY",
@@ -42,6 +49,7 @@ class Config:
         # OpenAI direct
         "openai_base_url": "OPENAI_BASE_URL",      # e.g. https://api.openai.com/v1
         "openai_api_key": "OPENAI_API_KEY",
+        "openai_chat_model": "OPENAI_CHAT_MODEL",
 
         # Azure OpenAI
         "openai_azure_api_key": "AZURE_OPENAI_API_KEY",

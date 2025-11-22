@@ -249,6 +249,7 @@ class IFUEmbedder:
 
         total = len(items)
         self.logger.info(f"Embedding {total} chunks (batch={self.batch_size})")
+
         out: List[EmbeddingRecord] = []
         if total == 0:
             return out

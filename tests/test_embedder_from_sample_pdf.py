@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
-from LangDetectDetector import LangDetectDetector
+from chunking.LangDetectDetector import LangDetectDetector
 from config.Config import Config
 from embedding.IFUEmbedder import IFUEmbedder
 from chunking.IFUChunker import IFUChunker
