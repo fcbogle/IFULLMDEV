@@ -3,13 +3,21 @@
 # Created: 2025-11-22
 # Description: test_full_rag_pipeline_interation.py
 # -----------------------------------------------------------------------------
+
 import os
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from chunking.LangDetectDetector import LangDetectDetector  # or your class name
 
+from chunking.IFUChunker import IFUChunker
+from embedding.IFUEmbedder import IFUEmbedder
+from ingestion.IFUFileLoader import IFUFileLoader
 from config.Config import Config
+from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
+from vectorstore.IFUVectorStore import IFUVectorStore
 
 
 def _build_cfg_or_skip(pdf_path: Path):
@@ -66,4 +74,94 @@ def _openai_chat_cfg_from_env():
         openai_org=org,
     )
 
+@pytest.mark.integration
+def test_full_pipeline_blob_to_rag_to_chat_roundtrip():
+    """
+    Full integration test:
+
+      A) Blob stage:
+         1) Upload local PDF to Azure Blob
+         2) Download same PDF from Blob
+         3) Extract text from downloaded bytes
+
+      B) RAG stage:
+         4) Chunk extracted text
+         5) Embed chunks
+         6) Upsert embeddings into Chroma
+         7) Embed question
+         8) Query Chroma for top-k chunks
+
+      C) Chat stage:
+         9) Build chat prompt from retrieved chunks
+        10) Call OpenAIChat
+        11) Validate response
+
+      D) Cleanup:
+        12) Delete uploaded blob
+        13) (optional) delete test collection
+    :return:
+    """
+    # Resolve local PDF path
+    local_pdf = os.getenv("IFU_SAMPLE_PDF")
+    if local_pdf:
+        local_pdf = Path(local_pdf)
+    else:
+        local_pdf = Path("/Users/frankbogle/Documents/ifu/BMK2IFU.pdf")
+
+    if not local_pdf.exists():
+        pytest.skip(f"Local PDF not found: {local_pdf}")
+
+    cfg = _build_cfg_or_skip(local_pdf)
+
+    tokenizer = lambda text: text.split()
+
+    lang_detector = LangDetectDetector()
+
+    # Instantiate core pipeline classes
+
+    loader = IFUFileLoader(cfg=cfg)
+
+    chunker = IFUChunker(
+        tokenizer=tokenizer,
+        lang_detector=lang_detector,
+        chunk_size_tokens=300,
+        overlap_tokens=100,
+    )
+
+    embedder = IFUEmbedder(
+        cfg,
+        batch_size=64,
+        normalize=True,
+        out_dtype="float32",
+        filter_lang=None,
+    )
+
+    # Use dedicated collection to avoid test data pollution
+    collection_name = os.getenv("IFU_TEST_COLLECTION", "ifu_chunks_e2e_test")
+    store: IFUVectorStore = ChromaIFUVectorStore(
+        cfg=cfg,
+        embedder=embedder,
+        collection_name=collection_name,
+    )
+
+    # Upload sample file to blob storage
+    container = os.getenv("IFU_BLOB_CONTAINER", "ifudocs")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    blob_name = f"ifu_pipeline_tests/{local_pdf.stem}_{ts}.pdf"
+
+    uploaded_blob_name = loader.upload_document_from_path(
+        local_path=str(local_pdf),
+        container=container,
+        blob_name=blob_name,
+    )  #
+
+    assert uploaded_blob_name == blob_name
+
+    # Download PDF bytes from blob
+    downloaded_bytes = loader.load_document(
+        container=container,
+        blob_name=blob_name,
+    )
+    assert isinstance(downloaded_bytes, (bytes, bytearray))
+    assert len(downloaded_bytes) > 0
 
