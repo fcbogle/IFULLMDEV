@@ -3,10 +3,12 @@
 # Created: 2025-11-11
 # Description: IFUChunker
 # -----------------------------------------------------------------------------
+import logging
 import uuid
-from typing import List, Callable, Dict, Any, Optional, Tuple
+from typing import List, Callable, Dict, Any, Optional, Tuple, Counter
 
 from chunking.IFUChunk import IFUChunk
+from utility.logging_utils import get_class_logger
 
 
 # from .ifu_chunk import IFUChunk  # adjust to your path
@@ -25,6 +27,7 @@ class IFUChunker:
         chunk_size_tokens: int = 300,
         overlap_tokens: int = 100,
         page_fallback_threshold: float = 0.65,   # if chunk conf < threshold, use page lang
+        logger = None,
     ):
         """
         :param tokenizer: function(text) -> List[str]
@@ -38,6 +41,7 @@ class IFUChunker:
         self.chunk_size_tokens = chunk_size_tokens
         self.overlap_tokens = overlap_tokens
         self.page_fallback_threshold = page_fallback_threshold
+        self.logger = logger or get_class_logger(self.__class__)
 
     # --- internal helper so we work with detectors w/ or w/o fallback kwarg ---
     def _detect_with_optional_fallback(
@@ -51,12 +55,17 @@ class IFUChunker:
             return self.lang_detector.detect(text)
 
     def chunk_document(
-        self,
-        doc_id: str,
-        doc_name: str,
-        pages: List[str],
-        doc_metadata: Optional[Dict[str, Any]] = None,
+            self,
+            doc_id: str,
+            doc_name: str,
+            pages: List[str],
+            doc_metadata: Optional[Dict[str, Any]] = None,
     ) -> List["IFUChunk"]:
+
+        # Logger setup
+        if not hasattr(self, "logger") or self.logger is None:
+            self.logger = logging.getLogger(self.__class__.__name__)
+
         if doc_metadata is None:
             doc_metadata = {}
 
@@ -64,15 +73,21 @@ class IFUChunker:
         region = doc_metadata.get("region")
         is_primary_language = doc_metadata.get("is_primary_language", False)
 
-        # Basic sanity checks (helpful in integration tests)
         if not isinstance(pages, list) or not all(isinstance(p, str) for p in pages):
-            raise TypeError("`pages` must be List[str] with one entry per PDF page.")
+            raise TypeError("`pages` must be List[str] (one string per page).")
 
         chunks: List["IFUChunk"] = []
-        char_offset = 0  # approximate character offset in full document
 
+        # Stats collection
+        lang_counts = Counter()
+        lang_conf_vals = []
+        chunk_lengths = []
+
+        char_offset = 0
+
+        # Begin Processing Pages
         for page_index, page_text in enumerate(pages, start=1):
-            # 1) Detect language at the PAGE level (for fallback)
+
             page_lang, page_confidence, page_script = self._detect_with_optional_fallback(
                 page_text, page_text
             )
@@ -86,21 +101,14 @@ class IFUChunker:
                 window_tokens = tokens[start_idx:end_idx]
                 chunk_text = " ".join(window_tokens)
 
-                # 2) Detect language at the CHUNK level, with page fallback support
+                # Detect language for chunk (with fallback)
                 lang, lang_confidence, script = self._detect_with_optional_fallback(
                     chunk_text, page_text
                 )
-
-                # 3) Enforce page-level fallback if chunk detection is weak/undetermined
                 if (lang == "und" or lang_confidence < self.page_fallback_threshold) and page_lang != "und":
                     lang, lang_confidence, script = page_lang, page_confidence, page_script
 
-                # 4) Approximate char positions (good enough for traceability)
-                chars_before = " ".join(tokens[:start_idx])
-                chunk_char_start = char_offset + len(chars_before)
-                chunk_char_end = chunk_char_start + len(chunk_text)
-
-                # 5) Build IFUChunk
+                # Build chunk
                 chunk = IFUChunk(
                     chunk_id=str(uuid.uuid4()),
                     doc_id=doc_id,
@@ -108,31 +116,56 @@ class IFUChunker:
                     text=chunk_text,
                     page_start=page_index,
                     page_end=page_index,
-                    char_start=chunk_char_start,
-                    char_end=chunk_char_end,
+                    char_start=char_offset + len(" ".join(tokens[:start_idx])),
+                    char_end=char_offset + len(" ".join(tokens[:start_idx])) + len(chunk_text),
                     lang=lang,
                     lang_confidence=lang_confidence,
                     script=script,
                     version=version,
                     region=region,
-                    section_type=None,           # set later if you have section tagging
+                    section_type=None,
                     is_primary_language=is_primary_language,
-                    translation_group_id=None,   # set later if you align translations
+                    translation_group_id=None,
                 )
 
-                # Optionally propagate all doc-level metadata into chunk.metadata
                 if doc_metadata:
                     chunk.metadata.update(doc_metadata)
 
                 chunks.append(chunk)
 
+                # Essential chunk logging per chunk
+                chunk_len = len(chunk_text)
+                chunk_lengths.append(chunk_len)
+                lang_counts[lang] += 1
+                lang_conf_vals.append(lang_confidence)
+
+                self.logger.info(
+                    "Chunk created: idx=%d page=%d lang=%s conf=%.2f length=%d chars",
+                    len(chunks), page_index, lang, lang_confidence, chunk_len
+                )
+
                 if end_idx == num_tokens:
                     break
-                # Slide window with overlap
+
                 start_idx = end_idx - self.overlap_tokens
 
-            # Move global char offset by this page's length (+1 as separator)
             char_offset += len(page_text) + 1
+
+        # Summary Logging
+        total_chunks = len(chunks)
+        if total_chunks > 0:
+            avg_len = sum(chunk_lengths) / total_chunks
+            avg_conf = sum(lang_conf_vals) / total_chunks
+
+            self.logger.info(
+                "Chunking Summary: chunks=%d | avg_len=%.1f chars | lang_counts=%s | avg_lang_conf=%.2f",
+                total_chunks,
+                avg_len,
+                dict(lang_counts),
+                avg_conf
+            )
+        else:
+            self.logger.warning("No chunks produced for doc_id=%s doc_name=%r", doc_id, doc_name)
 
         return chunks
 

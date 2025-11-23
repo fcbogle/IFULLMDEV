@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from IFUTextExtractor import IFUTextExtractor
 from chunking.LangDetectDetector import LangDetectDetector  # or your class name
 
 from chunking.IFUChunker import IFUChunker
@@ -121,6 +123,8 @@ def test_full_pipeline_blob_to_rag_to_chat_roundtrip():
 
     loader = IFUFileLoader(cfg=cfg)
 
+    extractor = IFUTextExtractor()
+
     chunker = IFUChunker(
         tokenizer=tokenizer,
         lang_detector=lang_detector,
@@ -164,4 +168,31 @@ def test_full_pipeline_blob_to_rag_to_chat_roundtrip():
     )
     assert isinstance(downloaded_bytes, (bytes, bytearray))
     assert len(downloaded_bytes) > 0
+
+    # Extract text from downloaded bytes
+    text = extractor.extract_text_from_pdf(downloaded_bytes)
+    assert isinstance(text, list), f"Expected extracted text to be str, got {type(text)}"
+
+    # Chunk extracted text
+    assert len(text) > 1, "Number of pages extracted less than 1"
+    doc_id = f"{local_pdf.stem}_{ts}"  # e.g. BMK2IFU_9f84c7a2
+    doc_name = local_pdf.name
+
+    doc_metadata = {
+        "version": "Unknown",
+        "region": "Unknown",
+        "is_primary_language": True,
+    }
+
+    chunks = chunker.chunk_document(
+        doc_id=doc_id,
+        doc_name=doc_name,
+        pages=text,
+        doc_metadata=doc_metadata,
+    )
+
+    # Type and length checks
+    assert isinstance(chunks, list) and len(chunks) > 0, "No chunks produced from IFU pages"
+
+
 
