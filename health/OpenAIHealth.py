@@ -9,7 +9,7 @@ import logging
 from typing import Optional
 
 from openai import OpenAI
-from AzureConfig import AzureConfig
+from config.Config import Config
 from utility.logging_utils import get_class_logger
 
 
@@ -18,7 +18,7 @@ class OpenAIHealth:
     Smoke tests for OpenAI API connectivity and basic chat completion.
     """
 
-    def __init__(self, cfg: AzureConfig, model_override: Optional[str] = None, logger: Optional[logging.Logger] = None):
+    def __init__(self, cfg: Config, model_override: Optional[str] = None, logger: Optional[logging.Logger] = None):
         self.cfg = cfg
         self.logger = logger or get_class_logger(self.__class__)
 
@@ -175,7 +175,7 @@ class OpenAIHealth:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    cfg = AzureConfig.from_env()
+    cfg = Config.from_env()
     ch = OpenAIHealth(cfg)
 
     info = ch.get_service_info()

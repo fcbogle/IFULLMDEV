@@ -10,14 +10,14 @@ import logging
 from azure.core.credentials import AzureNamedKeyCredential
 from azure.core.exceptions import ResourceExistsError
 from azure.storage.blob import BlobServiceClient
-from utility.logging_utils import get_class_logger
+from utility.logging_utils import get_class_logger, get_logger
 
-from AzureConfig import AzureConfig
+from config.Config import Config
 
 
 
 class BlobHealth:
-    def __init__(self, cfg: AzureConfig, logger: logging.Logger | None = None):
+    def __init__(self, cfg: Config, logger: logging.Logger | None = None):
         self.cfg = cfg
         self.logger = logger or get_class_logger(self.__class__)
 
@@ -75,7 +75,7 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
 
-    cfg = AzureConfig.from_env()
+    cfg = Config.from_env()
     logger = get_logger(__name__)
     bh = BlobHealth(cfg, logger=logger)
     ok = bh.check_blob()

@@ -9,7 +9,7 @@ import logging
 from utility.logging_utils import get_class_logger
 import chromadb
 
-from AzureConfig import AzureConfig
+from config.Config import Config
 
 class ChromaHealth:
     """
@@ -20,7 +20,7 @@ class ChromaHealth:
     - remove_index(): delete a dedicated healthcheck collection
     """
 
-    def __init__(self, cfg: AzureConfig, logger: Optional[logging.Logger] = None):
+    def __init__(self, cfg: Config, logger: Optional[logging.Logger] = None):
         self.cfg = cfg
         self.logger = logger or get_class_logger(self.__class__)
 
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     # Basic configuration for standalone runs
     logging.basicConfig(level=logging.INFO)
 
-    cfg = AzureConfig.from_env()
+    cfg = Config.from_env()
     ch = ChromaHealth(cfg)
 
     test_index = "healthcheck-index"

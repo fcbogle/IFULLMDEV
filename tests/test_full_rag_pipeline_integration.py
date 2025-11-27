@@ -1,7 +1,7 @@
 # -----------------------------------------------------------------------------
 # Author: Frank Campbell Bogle
 # Created: 2025-11-22
-# Description: test_full_rag_pipeline_interation.py
+# Description: test_full_rag_pipeline_integration.py
 # -----------------------------------------------------------------------------
 
 import os

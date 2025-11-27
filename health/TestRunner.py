@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, Optional
 
-from AzureConfig import AzureConfig
+from config.Config import Config
 from utility.logging_utils import get_class_logger
 
 from health.BlobHealth import BlobHealth
@@ -29,7 +29,7 @@ class TestRunner:
       - OpenAIHealth (OpenAI chat)
     """
 
-    def __init__(self, cfg: AzureConfig, logger: Optional[logging.Logger] = None):
+    def __init__(self, cfg: Config, logger: Optional[logging.Logger] = None):
         self.cfg = cfg
         self.logger = logger or get_class_logger(self.__class__)
 
@@ -154,7 +154,7 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
 
-    cfg = AzureConfig.from_env()
+    cfg = Config.from_env()
     runner = TestRunner(cfg)
 
     results = runner.run_all(run_heavy_openai=False)
