@@ -162,28 +162,51 @@ class IFUEmbedder:
         Embed arbitrary text strings using the same Azure model and settings
         as embed_chunks, returning List[List[float]].
         """
+
+        # Log entry
+        self.logger.info(
+            "Embedding %d text strings using model '%s'",
+            len(texts),
+            self.model
+        )
+        self.logger.debug("First text preview: %.80r", texts[0] if texts else None)
+
+        # Call Azure/OpenAI embeddings API
+        self.logger.debug("Sending embedding request to client=%r", self.client)
         resp = self.client.embeddings.create(
             model=self.model,
             input=list(texts),
         )
+        self.logger.debug("Received embedding response with %d vectors", len(resp.data))
 
-        # Convert to numpy for optional normalization + dtype handling
+        # Convert to numpy for normalization / dtype handling
         vectors = np.array([d.embedding for d in resp.data], dtype="float32")
+        self.logger.debug("Initial vectors shape: %s (dtype=float32)", vectors.shape)
 
-        # Apply same normalization logic as for chunks
+        # Optional normalization
         if getattr(self, "normalize", False):
+            self.logger.info("Normalizing embedding vectors")
             norms = np.linalg.norm(vectors, axis=1, keepdims=True)
             norms[norms == 0] = 1.0
             vectors = vectors / norms
+            self.logger.debug("Normalization complete")
 
-        # Respect out_dtype if you’re using it elsewhere
+        # Optional dtype conversion
         out_dtype = getattr(self, "out_dtype", None)
         if out_dtype is not None:
-            # e.g. "float32", "float16", etc.
+            self.logger.info("Converting embedding vectors to dtype='%s'", out_dtype)
             vectors = vectors.astype(out_dtype)
+            self.logger.debug("Dtype conversion complete (dtype now: %s)", vectors.dtype)
 
-        # Return plain Python list-of-lists for Chroma
-        return vectors.tolist()
+        # Convert back to Python list-of-lists (Chroma requirement)
+        out = vectors.tolist()
+        self.logger.info(
+            "Returning %d embedded vectors (each length=%d)",
+            len(out),
+            len(out[0]) if out else 0
+        )
+
+        return out
 
     def _embed_batch(self, texts: List[str], *, max_retries: int = 5) -> np.ndarray:
         """

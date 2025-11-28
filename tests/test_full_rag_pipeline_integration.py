@@ -140,12 +140,10 @@ def test_full_pipeline_blob_to_rag_to_chat_roundtrip():
         filter_lang=None,
     )
 
-    # Use dedicated collection to avoid test data pollution
-    collection_name = os.getenv("IFU_TEST_COLLECTION", "ifu_chunks_e2e_test")
-    store: IFUVectorStore = ChromaIFUVectorStore(
+    vector_store: IFUVectorStore = ChromaIFUVectorStore(
         cfg=cfg,
         embedder=embedder,
-        collection_name=collection_name,
+        collection_name="ifu_chunks_test",
     )
 
     # Upload sample file to blob storage
@@ -193,6 +191,25 @@ def test_full_pipeline_blob_to_rag_to_chat_roundtrip():
 
     # Type and length checks
     assert isinstance(chunks, list) and len(chunks) > 0, "No chunks produced from IFU pages"
+
+    # Embed all chunks
+    embedding_records = embedder.embed_chunks(chunks)
+    assert len(embedding_records) == len(chunks), "Embeddings count must match number of chunks"
+    assert embedding_records[0].vector is not None, "Embedding vector is None"
+
+    # Create and upsert Chroma vectors
+    vector_store.upsert_chunk_embeddings(doc_id, chunks, embedding_records)
+    initial_count = vector_store.collection.count()
+    new_count = vector_store.collection.count()
+    assert new_count == initial_count
+
+    # Create question and embed query
+    question = "what are the important guidelines about maintaining the device?"
+    q_vec = embedder.embed_texts(question)[0]
+    assert q_vec is not None, "Embedding vector is None"
+
+
+
 
 
 

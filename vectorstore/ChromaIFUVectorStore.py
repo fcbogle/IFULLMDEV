@@ -20,7 +20,7 @@ from vectorstore.IFUVectorStore import IFUVectorStore
 @dataclass
 class ChromaIFUVectorStore(IFUVectorStore):
     cfg: Config
-    embedder: IFUEmbedder  # ⬅️ new dependency
+    embedder: IFUEmbedder
     collection_name: str = "ifu_chunks"
     logger: Any = None
 
