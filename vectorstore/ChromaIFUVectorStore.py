@@ -4,7 +4,7 @@
 # Description: ChromaIFUVectorStore
 # -----------------------------------------------------------------------------
 from dataclasses import dataclass
-from typing import Sequence, Dict, Any, List
+from typing import Sequence, Dict, Any, List, Counter
 
 import chromadb
 from chromadb import ClientAPI
@@ -246,3 +246,37 @@ class ChromaIFUVectorStore(IFUVectorStore):
             self.collection_name,
         )
         return deleted_count
+
+    def list_documents(self, *, limit: int = 10000) -> List[Dict[str, Any]]:
+        """
+        Return a list of documents present in this collection,
+        aggregated from chunk metadata.
+
+        Each entry:
+            {
+              "doc_id": "BMK2IFU.pdf",
+              "chunk_count": 42
+            }
+        """
+        if not self.collection:
+            return []
+
+        resp = self.collection.get(
+            limit=limit,
+            include=["metadatas"],
+        )
+
+        metadatas = resp.get("metadatas") or []
+        counts = Counter()
+
+        for md in metadatas:
+            if not isinstance(md, dict):
+                continue
+            doc_id = md.get("doc_id") or md.get("source_name")
+            if doc_id:
+                counts[doc_id] += 1
+
+        return [
+            {"doc_id": doc_id, "chunk_count": count}
+            for doc_id, count in counts.items()
+        ]
