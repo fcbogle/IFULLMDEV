@@ -7,7 +7,7 @@ import re
 from dataclasses import field
 from typing import Any
 
-from LangDetectDetector import LangDetectDetector
+from chunking.LangDetectDetector import LangDetectDetector
 from config.Config import Config
 from chunking.IFUChunker import IFUChunker
 from embedding.IFUEmbedder import IFUEmbedder

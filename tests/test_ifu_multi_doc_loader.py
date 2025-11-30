@@ -13,7 +13,7 @@ from ingestion.IFUFileLoader import IFUFileLoader
 from chunking.IFUChunker import IFUChunker
 from embedding.IFUEmbedder import IFUEmbedder
 from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
-from LangDetectDetector import LangDetectDetector
+from chunking.LangDetectDetector import LangDetectDetector
 
 pytestmark = pytest.mark.integration
 

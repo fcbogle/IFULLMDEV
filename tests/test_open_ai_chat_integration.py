@@ -65,8 +65,9 @@ def test_openai_chat_simple_roundtrip():
         max_tokens=5,
     )
 
-    assert isinstance(resp, str)
-    assert len(resp.strip()) > 0
+    assert isinstance(resp, dict)
+    assert "answer" in resp
+    assert resp["answer"].strip().upper() == "OK"
 
 @pytest.mark.integration
 def test_openai_chat_healthcheck():

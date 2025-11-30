@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from IFUTextExtractor import IFUTextExtractor
+from extractor.IFUTextExtractor import IFUTextExtractor
 from chunking.LangDetectDetector import LangDetectDetector  # or your class name
 
 from chunking.IFUChunker import IFUChunker
