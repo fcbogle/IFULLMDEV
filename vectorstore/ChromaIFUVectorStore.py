@@ -17,7 +17,7 @@ from utility.logging_utils import get_class_logger
 from vectorstore.IFUVectorStore import IFUVectorStore
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ChromaIFUVectorStore(IFUVectorStore):
     cfg: Config
     embedder: IFUEmbedder

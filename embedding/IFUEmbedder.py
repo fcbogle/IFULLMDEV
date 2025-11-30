@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------------
 import time
 from typing import Optional, List, Iterable, Any, Set, Sequence
-
+import logging
 import numpy as np
 from openai import AzureOpenAI, OpenAI
 
@@ -23,7 +23,7 @@ class IFUEmbedder:
             normalize: bool = True,
             out_dtype: str = "float32",
             filter_lang: Optional[Set[str]] = None,  # e.g., {"en"} to embed only English
-            logger=None,
+            logger: logging.Logger | None = None
     ):
         self.cfg = cfg
         self.batch_size = batch_size
