@@ -10,7 +10,7 @@ import fitz
 from utility.logging_utils import get_class_logger
 
 class IFUTextExtractor:
-    def __init__(self, logger = None):
+    def __init__(self, *, logger = None):
         self.logger = logger or get_class_logger(self.__class__)
 
     def extract_text_from_pdf(self, pdf_bytes: bytes) -> List[str]:

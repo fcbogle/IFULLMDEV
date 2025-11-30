@@ -26,7 +26,7 @@ class LangDetectDetector:
       - primary: langdetect
       - secondary: langid (for short/noisy text)
     """
-    def __init__(self, min_len: int = 40, min_conf: float = 0.60):
+    def __init__(self, *, min_len: int = 40, min_conf: float = 0.60):
         self.min_len = min_len
         self.min_conf = min_conf
 

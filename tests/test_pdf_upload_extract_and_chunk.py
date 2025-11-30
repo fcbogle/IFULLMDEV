@@ -5,6 +5,7 @@
 # -----------------------------------------------------------------------------
 import hashlib
 import os
+import re
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -128,7 +129,7 @@ def test_pdf_upload_extract_and_chunk():
     total_chars = sum(len(p) for p in pages)
     print(f"Total characters across all pages: {total_chars}")
 
-    tokenizer = lambda s: s.split()
+    tokenizer = lambda text: re.findall(r"\w+|\S", text)
 
     # Token counts per page
     token_counts = [len(tokenizer(p)) for p in pages]

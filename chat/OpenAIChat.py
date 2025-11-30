@@ -62,7 +62,7 @@ class OpenAIChat:
             seed: Optional[int] = None,
             response_format: Optional[Dict[str, Any]] = None,
             extra_params: Optional[Dict[str, Any]] = None,
-    ) -> str:
+    ) -> Any:  # or a specific ChatCompletion type if you import it
         if not messages:
             raise ValueError("messages must be non-empty.")
 
@@ -81,18 +81,17 @@ class OpenAIChat:
             params.update(extra_params)
 
         self.logger.debug(
-            "Chat request: model=%s temp=%s max_tokens=%s",
-            self.model, temperature, max_tokens
+            "Chat request: model=%s temp=%s max_tokens=%s top_p=%s",
+            self.model, temperature, max_tokens, top_p
         )
 
         resp = self.client.chat.completions.create(**params)
 
-        try:
-            content = resp.choices[0].message.content or ""
-        except Exception as e:
-            raise RuntimeError(f"Unexpected chat response format: {e}")
+        # Log raw response for debugging
+        self.logger.debug("Raw ChatCompletion response: %r", resp)
 
-        return content
+        # Return the full response object (NOT just the content)
+        return resp
 
     # Streaming chat call
     def chat_stream(
@@ -139,12 +138,29 @@ class OpenAIChat:
             user_text: str,
             system_text: Optional[str] = None,
             **kwargs: Any,
-    ) -> str:
+    ) -> dict:
         messages: List[Message] = []
         if system_text:
             messages.append({"role": "system", "content": system_text})
         messages.append({"role": "user", "content": user_text})
-        return self.chat(messages, **kwargs)
+
+        resp = self.chat(messages, **kwargs)
+
+        try:
+            content = resp.choices[0].message.content or ""
+        except Exception as e:
+            self.logger.error("Unexpected chat response format: %s", e, exc_info=True)
+            raise RuntimeError(f"Unexpected chat response format: {e}")
+
+        self.logger.info("Chat answer generated (model=%s)", getattr(resp, "model", None))
+        self.logger.debug("Token usage: %r", getattr(resp, "usage", None))
+
+        return {
+            "answer": content,
+            "raw": resp,
+            "usage": getattr(resp, "usage", None),
+            "model": getattr(resp, "model", None),
+        }
 
     def healthcheck(self) -> bool:
         try:

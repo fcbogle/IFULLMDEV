@@ -3,7 +3,6 @@
 # Created: 2025-11-08
 # Description: IFUFileLoader
 # -----------------------------------------------------------------------------
-import hashlib
 import logging
 import time
 from pathlib import Path
@@ -13,7 +12,7 @@ from azure.core.credentials import AzureNamedKeyCredential
 from azure.core.exceptions import ResourceNotFoundError, AzureError, ResourceExistsError
 
 from utility.logging_utils import get_class_logger
-from config import Config  # or Config if renamed
+from config.Config import Config  # or Config if renamed
 
 
 class IFUFileLoader:
@@ -27,11 +26,13 @@ class IFUFileLoader:
     Logs detailed timing and error information.
     """
 
-    def __init__(self, cfg: Config, logger: logging.Logger | None = None):
+    def __init__(self, cfg: Config,*, logger: logging.Logger | None = None):
         self.cfg = cfg
+        self.blob_service: BlobServiceClient | None = None
         self.logger = logger or get_class_logger(self.__class__)
 
         start_time = time.time()
+
         try:
             self.blob_service = BlobServiceClient(
                 account_url=f"https://{cfg.storage_account}.blob.core.windows.net",

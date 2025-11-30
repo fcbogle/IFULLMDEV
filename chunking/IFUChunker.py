@@ -22,10 +22,11 @@ class IFUChunker:
         self,
         tokenizer: Callable[[str], List[str]],
         lang_detector,
+        *,
         chunk_size_tokens: int = 300,
         overlap_tokens: int = 100,
         page_fallback_threshold: float = 0.65,
-        logger=None,
+        logger: logging.Logger | None = None,
     ):
         self.tokenizer = tokenizer
         self.lang_detector = lang_detector

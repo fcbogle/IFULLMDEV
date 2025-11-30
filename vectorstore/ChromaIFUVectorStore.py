@@ -119,29 +119,65 @@ class ChromaIFUVectorStore(IFUVectorStore):
             n_results: int = 5,
             where: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+
+        # High-level log for pipeline visibility
         self.logger.info(
-            "Querying Chroma collection '%s' with: %r (n_results=%d, where=%s)",
+            "Querying Chroma collection '%s' with query=%r (n_results=%d, where=%s)",
             self.collection_name,
             query_text,
             n_results,
             where,
         )
 
-        # 1) Embed query with the same model as chunks
-        query_vectors = self.embedder.embed_texts([query_text])  # returns List[List[float]]
+        try:
+            # 1) Embed query text
+            self.logger.debug("Embedding query text using embedder=%r", self.embedder)
+            query_vectors = self.embedder.embed_texts([query_text])  # List[List[float]]
+            self.logger.debug(
+                "Query embedding generated: vector_length=%d",
+                len(query_vectors[0]) if query_vectors else -1,
+            )
 
-        # 2) Build kwargs for Chroma
-        query_kwargs: Dict[str, Any] = {
-            "query_embeddings": query_vectors,
-            "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where is not None:
-            query_kwargs["where"] = where
+            # 2) Build Chroma query parameters
+            query_kwargs: Dict[str, Any] = {
+                "query_embeddings": query_vectors,
+                "n_results": n_results,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where is not None:
+                self.logger.debug("Applying metadata filter (where=%s)", where)
+                query_kwargs["where"] = where
 
-        # 3) Query Chroma using precomputed embeddings
-        res = self.collection.query(**query_kwargs)
-        return res
+            self.logger.debug(
+                "Final Chroma query kwargs: keys=%s",
+                list(query_kwargs.keys())
+            )
+
+            # 3) Execute Chroma query
+            self.logger.debug("Issuing Chroma query against collection '%s'", self.collection_name)
+            res = self.collection.query(**query_kwargs)
+
+            # Log summary of results
+            returned = len(res.get("ids", []))
+            self.logger.info(
+                "Chroma search complete: returned %d results (requested %d)",
+                returned,
+                n_results,
+            )
+            self.logger.debug(
+                "Chroma result keys: %s",
+                list(res.keys())
+            )
+
+            return res
+
+        except Exception as e:
+            self.logger.error(
+                "Error during query_text execution: %s",
+                str(e),
+                exc_info=True
+            )
+            raise
 
     def delete_by_doc_id(self, doc_id: str) -> int:
         """

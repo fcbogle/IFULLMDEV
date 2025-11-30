@@ -18,6 +18,7 @@ from chunking.IFUChunker import IFUChunker
 from embedding.IFUEmbedder import IFUEmbedder
 from ingestion.IFUFileLoader import IFUFileLoader
 from config.Config import Config
+from chat.OpenAIChat import OpenAIChat
 from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
 from vectorstore.IFUVectorStore import IFUVectorStore
 
@@ -204,9 +205,49 @@ def test_full_pipeline_blob_to_rag_to_chat_roundtrip():
     assert new_count == initial_count
 
     # Create question and embed query
-    question = "what are the important guidelines about maintaining the device?"
+    question = "how to clean device?"
     q_vec = embedder.embed_texts(question)[0]
     assert q_vec is not None, "Embedding vector is None"
+
+    # Query ChromaDB stored vectors
+    query_results = vector_store.query_text(question, n_results=3)
+    assert query_results is not None and "documents" in query_results
+    retrieved_texts = query_results["documents"][0]
+    assert retrieved_texts and len(retrieved_texts) > 0
+
+    # Build chat prompt from retrieved results
+    context_block = "\n\n".join(f"- {t}" for t in retrieved_texts[:5])
+
+    system_prompt = (
+        "You are an IFU compliance assistant. "
+        "Answer using only the provided context. "
+        "If the context is insufficient, say you don't know."
+    )
+    user_prompt = (
+        f"Context:\n{context_block}\n\n"
+        f"Question: {question}\n\n"
+        "Answer clearly and concisely."
+    )
+
+    # Call OpenAI Chat for response
+    chat_cfg = _openai_chat_cfg_from_env()
+    if chat_cfg is None:
+        pytest.skip("OPENAI_API_KEY / OPENAI_CHAT_MODEL not set; skipping chat step.")
+
+    chat = OpenAIChat(cfg=chat_cfg)
+    resp = chat.simple_chat(
+        user_text=user_prompt,
+        system_text=system_prompt,
+        temperature=0.0,
+        max_tokens=300,
+    )
+
+    answer = resp["answer"]
+    print("RAW:", resp["raw"])
+    print("USAGE:", resp["usage"])
+
+    assert isinstance(answer, str)
+    assert len(answer.strip()) > 0
 
 
 
