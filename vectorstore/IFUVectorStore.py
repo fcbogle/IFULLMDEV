@@ -3,7 +3,7 @@
 # Created: 2025-11-15
 # Description: IFUVectorStore
 # -----------------------------------------------------------------------------
-
+from abc import abstractmethod
 from typing import Protocol, Sequence, Dict, Any, runtime_checkable
 
 from chunking.IFUChunk import IFUChunk
@@ -15,6 +15,7 @@ class IFUVectorStore(Protocol):
     def test_connection(self) -> bool:
         ...
 
+    @abstractmethod
     def upsert_chunk_embeddings(
             self,
             doc_id: str,

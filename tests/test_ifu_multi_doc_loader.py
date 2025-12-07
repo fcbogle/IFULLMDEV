@@ -194,8 +194,90 @@ def test_multi_doc_loader_download_chunk_embed_query():
             assert all(isinstance(p, str) for p in pages)
 
             # Chunk document into IFUChunks
+            doc_id = blob_name
+            doc_name = local_path.name
+            doc_metadata = {
+                "blob_name": blob_name,
+                "container": container,
+                "filename": local_path.name,
+            }
 
+            chunks = loader.chunker.chunk_document(
+                doc_id=doc_id,
+                doc_name=doc_name,
+                pages=pages,
+                doc_metadata=doc_metadata,
+            )
+            assert chunks, f"No chunks produced for blob '{blob_name}'"
 
+            test_logger.info(
+                "Produced %d chunks for blob '%s'", len(chunks), blob_name
+            )
+
+            # Embed chunks using IFUEmbedder
+            embedding_records = loader.embedder.embed_chunks(chunks)
+            assert embedding_records, f"No embeddings produced for blob '{blob_name}'"
+            assert len(embedding_records) == len(chunks)
+
+            # Upsert into Chroma vector store
+            loader.store.upsert_chunk_embeddings(doc_id, chunks, records=embedding_records)
+
+        # Run semantic query against Chroma
+        query_text = "Blatchford"
+        result = loader.store.query_text(query_text, n_results=5)
+        assert isinstance(result, dict), "Vector store query result should be a dict"
+        assert "documents" in result and "metadatas" in result, "Malformed vector store result"
+
+        documents = result["documents"]
+        metadatas = result["metadatas"]
+
+        # Chroma returns lists-of-lists for documents/metadatas
+        assert len(documents) == 1
+        assert len(metadatas) == 1
+
+        returned_docs = documents[0]
+        returned_metas = metadatas[0]
+
+        assert returned_docs, "No documents returned from vector store query"
+        assert len(returned_docs) == len(returned_metas)
+
+        first_doc = returned_docs[0]
+        first_meta = returned_metas[0]
+
+        assert isinstance(first_doc, str) and first_doc.strip(), "First returned document text is empty"
+        assert isinstance(first_meta, dict), "Metadata entry is not a dict"
+        assert "blob_name" in first_meta or "doc_id" in first_meta
+
+        test_logger.info("Vector store query returned %d hits", len(returned_docs))
 
     finally:
-        _ = None
+        # ---- Cleanup: delete uploaded blobs (best-effort) ----
+        for local_path, blob_name in results.items():
+            try:
+                blob_client = container_client.get_blob_client(blob_name)
+                blob_client.delete_blob()
+                test_logger.info("Deleted test blob '%s'", blob_name)
+
+            except Exception as e:
+                test_logger.error("Failed to delete blob '%s': %s", blob_name, e)
+        # ---- Cleanup: delete Chroma chunks for each doc_id ----
+        try:
+            for _, blob_name in results.items():
+                try:
+                    deleted = loader.store.delete_by_doc_id(blob_name)
+                    test_logger.info(
+                        "Deleted %d Chroma chunks for doc_id '%s'",
+                        deleted,
+                        blob_name,
+                    )
+
+                except Exception as e:
+                    test_logger.error(
+                        "Failed to delete Chroma chunks for doc_id '%s': %s",
+                        blob_name,
+                        e,
+                    )
+
+        except Exception as e:
+            test_logger.error(f"Chroma cleanup encountered an error: {e}")
+

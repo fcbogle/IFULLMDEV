@@ -199,7 +199,7 @@ def test_full_pipeline_blob_to_rag_to_chat_roundtrip():
     assert embedding_records[0].vector is not None, "Embedding vector is None"
 
     # Create and upsert Chroma vectors
-    vector_store.upsert_chunk_embeddings(doc_id, chunks, embedding_records)
+    vector_store.upsert_chunk_embeddings(doc_id, chunks, records=embedding_records)
     initial_count = vector_store.collection.count()
     new_count = vector_store.collection.count()
     assert new_count == initial_count

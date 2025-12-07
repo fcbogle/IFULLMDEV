@@ -179,11 +179,7 @@ def test_chroma_end_to_end_via_blob():
     )
     assert store.test_connection() is True
 
-    store.upsert_chunk_embeddings(
-        doc_id=doc_id,
-        chunks=chunks,
-        records=records,
-    )
+    store.upsert_chunk_embeddings(doc_id=doc_id, chunks=chunks, records=records)
     # Run a semantic query on Chroma vector database
     query = "maximum patient weight"
     res = store.query_text(query, n_results=3)

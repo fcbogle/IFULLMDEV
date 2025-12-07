@@ -60,6 +60,7 @@ class ChromaIFUVectorStore(IFUVectorStore):
             self.logger.error("Chroma connection failed: %s", e)
             return False
 
+
     def upsert_chunk_embeddings(
             self,
             doc_id: str,

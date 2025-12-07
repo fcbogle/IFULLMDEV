@@ -253,12 +253,26 @@ class IFUDocumentLoader:
             doc_name,
         )
 
-        # Add chunks to vector store
-        self.store.upsert_chunk_embeddings(doc_id=doc_id, chunks=chunks)
+        # Embed chunks using IFUEmbedder
+        embedding_records = self.embedder.embed_chunks(chunks)
+        if not embedding_records:
+            self.logger.warning(
+                "No embeddings produced for doc_id=%s doc_name=%r (blob=%s)",
+                doc_id,
+                doc_name,
+                blob_name,
+            )
+            return
+
+        # Check length of embedding records prior to upsert
+        if len(embedding_records) != len(chunks):
+            self.logger.error("Embedding records length mismatch: %d != %d", len(embedding_records), len(chunks))
+            raise ValueError(f"Expected {len(chunks)} embedding records, got {len(embedding_records)}")
+
+        # Upsert chunks and records into Chroma vector store
+        self.store.upsert_chunk_embeddings(doc_id, chunks, records=embedding_records)
 
         self.logger.info(
-            "Indexed %d chunks from blob '%s' into collection '%s'",
-            len(chunks),
-            blob_name,
-            self.collection_name,
+            "Successfully ingested blob '%s' into collection '%s'", blob_name, self.collection_name
         )
+
