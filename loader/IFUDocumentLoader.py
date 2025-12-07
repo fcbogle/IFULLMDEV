@@ -3,21 +3,21 @@
 # Created: 2025-11-29
 # Description: IFUDocumentLoader.py
 # -----------------------------------------------------------------------------
+import logging
 import re
 from dataclasses import field
 from pathlib import Path
-from typing import Any, Iterable, Dict
+from typing import Any, Iterable, Dict, List
 
+from chunking.IFUChunker import IFUChunker
 from chunking.LangDetectDetector import LangDetectDetector
 from config.Config import Config
-from chunking.IFUChunker import IFUChunker
 from embedding.IFUEmbedder import IFUEmbedder
+from extractor.IFUTextExtractor import IFUTextExtractor
 from ingestion.IFUFileLoader import IFUFileLoader
+from utility.logging_utils import get_class_logger
 from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
 from vectorstore.IFUVectorStore import IFUVectorStore
-from utility.logging_utils import get_class_logger
-
-import logging
 
 
 class IFUDocumentLoader:
@@ -26,6 +26,7 @@ class IFUDocumentLoader:
     loader: IFUFileLoader = field(init=False)
     chunker: IFUChunker = field(init=False)
     embedder: IFUEmbedder = field(init=False)
+    extractor: Any = None
     store: IFUVectorStore = field(init=False)
     lang_detector: Any = None
     logger: Any = None
@@ -69,6 +70,9 @@ class IFUDocumentLoader:
             out_dtype="float32",
             filter_lang=None,
         )
+
+        # Extractor
+        self.extractor = IFUTextExtractor()
 
         # Chroma vector store
         self.store = ChromaIFUVectorStore(
@@ -126,15 +130,135 @@ class IFUDocumentLoader:
 
         return results
 
+    def ingest_blob_pdfs(self,
+                         blob_names: Iterable[str],
+                         *,
+                         container: str = "ifu_docs",
+                         ) -> int:
+        """
+        Ingest existing PDFs from Azure Blob into the vector store.
+
+        For each blob:
+          - download PDF bytes
+          - extract text
+          - chunk text
+          - embed & store chunks
+
+        Args:
+            blob_names: Iterable of blob names (within the given container).
+            container: Blob container where PDFs live.
+
+        Returns:
+            Number of blobs successfully ingested.
+        """
+
+        ingested_count = 0
+        for blob_name in blob_names:
+            try:
+                self._process_single_pdf(
+                    container=container,
+                    blob_name=blob_name,
+                    source_path=None
+                )
+                ingested_count += 1
+            except Exception as e:
+                self.logger.error("Failed to ingest blob '%s': %s",
+                                  blob_name,
+                                  container,
+                                  e,
+                                  )
+                self.logger.info(
+                    "Blob ingest complete: %d/%d blobs successfully indexed",
+                    ingested_count,
+                    len(list(blob_names)),
+                )
+        return ingested_count
+
+    def _process_single_pdf(self,
+                            *,
+                            container: str,
+                            blob_name: str,
+                            source_path: Path | None = None,
+                            ) -> None:
+        """
+        Process a single PDF already present in Blob Storage.
+
+        Steps:
+          - Download PDF bytes
+          - Extract text
+          - Chunk (with language detection)
+          - Add chunks to vector store
+
+        """
+        self.logger.info(
+        "processing blob '%s' from container '%s' into collection '%s", blob_name, container, self.collection_name
+        )
+
+        # Download PDF from blob storage
+        pdf_bytes = self.loader.load_document(blob_name=blob_name, container=container)
+        if not pdf_bytes:
+            raise ValueError(f"No bytes returned for blob '{blob_name}' from container '{container}'")
+
+        # Extract text from PDF bytes
+        text = self.extractor.extract_text_from_pdf(pdf_bytes)
+
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"Empty text extracted for blob '{blob_name}'")
+
+        # Get per page text
+        pages: List[str]
+        if hasattr(self.extractor, "extract_pages"):
+            pages = self.extractor.extract_pages(pdf_bytes)
+            if not isinstance(pages, list) or not all(isinstance(p, str) for p in pages):
+                self.logger.warning(
+                    "Page extraction returned invalid format for blob '%s'; "
+                    "falling back to single page.",
+                    blob_name,
+                )
+                pages = [text]
+        else:
+            pages = [text]
 
 
+        # Build IDs and metadata for chunker
+        doc_id = blob_name  # simple, stable ID; can be changed later if needed
+        doc_name = source_path.name if source_path is not None else blob_name
 
+        doc_metadata: Dict[str, Any] = {
+            "blob_name": blob_name,
+            "container": container,
+        }
+        if source_path is not None:
+            doc_metadata["source_path"] = str(source_path)
+            doc_metadata["filename"] = source_path.name
+        else:
+            doc_metadata["filename"] = blob_name
 
+        # Chunk the document
+        chunks = self.chunker.chunk_document(doc_id=doc_id, doc_name=doc_name, pages=pages, doc_metadata=doc_metadata)
 
+        if not chunks:
+            self.logger.warning(
+                "No chunks produced for doc_id=%s doc_name=%r (blob=%s)",
+                doc_id,
+                doc_name,
+                blob_name,
+            )
+            return
 
+        self.logger.info(
+            "Generated %d chunks for doc_id=%s doc_name=%r",
+            len(chunks),
+            doc_id,
+            doc_name,
+        )
 
+        # Add chunks to vector store
+        self.store.upsert_chunk_embeddings(doc_id=doc_id, chunks=chunks)
 
-
-
-
-
+        self.logger.info(
+            "Indexed %d chunks from blob '%s' into collection '%s'",
+            len(chunks),
+            blob_name,
+            self.collection_name,
+        )

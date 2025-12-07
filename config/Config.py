@@ -16,6 +16,7 @@ load_dotenv(find_dotenv(usecwd=True), override=True)
 class Config:
     # IFU Sample PDF
     ifu_sample_pdf: str
+    ifu_sample_folder: str
 
     # Azure Storage
     storage_account: str
@@ -41,6 +42,7 @@ class Config:
     ENV_VARS = {
         # IFU Sample PDF
         "ifu_sample_pdf": "IFU_SAMPLE_PDF",
+        "ifu_sample_folder": "IFU_SAMPLE_FOLDER",
 
         # Storage
         "storage_account": "AZURE_STORAGE_ACCOUNT",
