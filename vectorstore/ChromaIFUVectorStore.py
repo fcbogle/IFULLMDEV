@@ -255,40 +255,82 @@ class ChromaIFUVectorStore(IFUVectorStore):
         )
         return deleted_count
 
-    def list_documents(self, *, limit: int = 300) -> List[Dict[str, Any]]:
+    from collections import Counter
+    from typing import Any, Dict, List
+
+    def list_documents(self, *, limit: int = 1000) -> List[Dict[str, Any]]:
+        """
+        Return a list of documents present in this collection,
+        aggregated from chunk metadata.
+
+        We page through Chroma in batches (max 300 per request) so we
+        don't hit the 'Limit value' quota and still see all chunks.
+
+        Each entry:
+            {
+              "doc_id": "BMK2IFU.pdf",
+              "chunk_count": 289,
+              "page_count": 164
+            }
+        """
         if not self.collection:
             return []
 
-        resp = self.collection.get(
-            limit=min(limit, 300),
-            include=["metadatas"],
-        )
+        # Chroma Cloud quota: per-request limit <= 300
+        page_size = 300
 
-        metadatas = resp.get("metadatas") or []
         counts = Counter()
         page_counts: Dict[str, int] = {}
 
-        if metadatas:
-            self.logger.info("list_documents sample md: %r", metadatas[0])
+        offset = 0
+        seen = 0
 
-        for md in metadatas:
-            if not isinstance(md, dict):
-                continue
+        while seen < limit:
+            # Don't ask for more than remaining "limit" overall
+            batch_limit = min(page_size, limit - seen)
+            if batch_limit <= 0:
+                break
 
-            doc_id = md.get("doc_id") or md.get("source_name")
-            if not doc_id:
-                continue
+            resp = self.collection.get(
+                limit=batch_limit,
+                offset=offset,
+                include=["metadatas"],
+            )
 
-            counts[doc_id] += 1
+            metadatas = resp.get("metadatas") or []
+            if not metadatas:
+                break  # no more data
 
-            pc_raw = md.get("page_count")
-            if pc_raw is not None:
-                try:
-                    pc = int(pc_raw)
-                    if doc_id not in page_counts:
-                        page_counts[doc_id] = pc
-                except (TypeError, ValueError):
-                    pass
+            # Log a sample on first page for debugging
+            if offset == 0 and metadatas:
+                self.logger.info("list_documents sample md: %r", metadatas[0])
+
+            for md in metadatas:
+                if not isinstance(md, dict):
+                    continue
+
+                doc_id = md.get("doc_id") or md.get("source_name")
+                if not doc_id:
+                    continue
+
+                # Increment chunk count
+                counts[doc_id] += 1
+
+                # Capture page_count once per doc_id (if present)
+                pc_raw = md.get("page_count")
+                if pc_raw is not None and doc_id not in page_counts:
+                    try:
+                        page_counts[doc_id] = int(pc_raw)
+                    except (TypeError, ValueError):
+                        pass
+
+            batch_len = len(metadatas)
+            seen += batch_len
+            offset += batch_len
+
+            # If we got fewer items than requested, we've exhausted the collection
+            if batch_len < batch_limit:
+                break
 
         docs: List[Dict[str, Any]] = []
         for doc_id, chunk_count in counts.items():
@@ -302,3 +344,4 @@ class ChromaIFUVectorStore(IFUVectorStore):
 
         self.logger.info("list_documents docs summary: %r", docs[:2])
         return docs
+
