@@ -21,7 +21,7 @@ from vectorstore.IFUVectorStore import IFUVectorStore
 class ChromaIFUVectorStore(IFUVectorStore):
     cfg: Config
     embedder: IFUEmbedder
-    collection_name: str = "ifu_chunks"
+    collection_name: str = "ifu-docs-test"
     logger: Any = None
 
     def __post_init__(self) -> None:
@@ -60,7 +60,6 @@ class ChromaIFUVectorStore(IFUVectorStore):
             self.logger.error("Chroma connection failed: %s", e)
             return False
 
-
     def upsert_chunk_embeddings(
             self,
             doc_id: str,
@@ -77,8 +76,8 @@ class ChromaIFUVectorStore(IFUVectorStore):
         embeddings: List[List[float]] = []
         metadatas: List[Dict[str, Any]] = []
 
-        for chunk, rec in zip(chunks, records):
-            # Optional safety check – catches accidental mismatches early
+        for idx, (chunk, rec) in enumerate(zip(chunks, records)):
+            # Safety check
             if getattr(chunk, "doc_id", doc_id) != doc_id:
                 raise ValueError(
                     f"Chunk doc_id '{chunk.doc_id}' does not match upsert doc_id '{doc_id}'"
@@ -88,18 +87,26 @@ class ChromaIFUVectorStore(IFUVectorStore):
             if hasattr(vec, "tolist"):
                 vec = vec.tolist()
 
+            # Start from embedding record metadata (this should include page_count)
+            meta: Dict[str, Any] = dict(getattr(rec, "metadata", {}) or {})
+
+            # Fill required/standard fields if missing
+            meta.setdefault("doc_id", doc_id)
+            meta.setdefault("doc_name", getattr(chunk, "doc_name", None))
+            meta.setdefault("page_start", getattr(chunk, "page_start", None))
+            meta.setdefault("page_end", getattr(chunk, "page_end", None))
+            meta.setdefault("lang", getattr(chunk, "lang", None))
+            meta.setdefault("version", getattr(chunk, "version", None))
+            meta.setdefault("region", getattr(chunk, "region", None))
+
             ids.append(chunk.chunk_id)
             documents.append(chunk.text)
             embeddings.append(vec)
-            metadatas.append({
-                "doc_id": doc_id,
-                "doc_name": chunk.doc_name,
-                "page_start": chunk.page_start,
-                "page_end": chunk.page_end,
-                "lang": chunk.lang,
-                "version": getattr(chunk, "version", None),
-                "region": getattr(chunk, "region", None),
-            })
+            metadatas.append(meta)
+
+        # Optional: log a sample to verify page_count shows up
+        if metadatas:
+            self.logger.info("Sample metadata sent to Chroma: %r", metadatas[0])
 
         self.collection.upsert(
             ids=ids,
@@ -248,36 +255,50 @@ class ChromaIFUVectorStore(IFUVectorStore):
         )
         return deleted_count
 
-    def list_documents(self, *, limit: int = 10000) -> List[Dict[str, Any]]:
-        """
-        Return a list of documents present in this collection,
-        aggregated from chunk metadata.
-
-        Each entry:
-            {
-              "doc_id": "BMK2IFU.pdf",
-              "chunk_count": 42
-            }
-        """
+    def list_documents(self, *, limit: int = 300) -> List[Dict[str, Any]]:
         if not self.collection:
             return []
 
         resp = self.collection.get(
-            limit=limit,
+            limit=min(limit, 300),
             include=["metadatas"],
         )
 
         metadatas = resp.get("metadatas") or []
         counts = Counter()
+        page_counts: Dict[str, int] = {}
+
+        if metadatas:
+            self.logger.info("list_documents sample md: %r", metadatas[0])
 
         for md in metadatas:
             if not isinstance(md, dict):
                 continue
-            doc_id = md.get("doc_id") or md.get("source_name")
-            if doc_id:
-                counts[doc_id] += 1
 
-        return [
-            {"doc_id": doc_id, "chunk_count": count}
-            for doc_id, count in counts.items()
-        ]
+            doc_id = md.get("doc_id") or md.get("source_name")
+            if not doc_id:
+                continue
+
+            counts[doc_id] += 1
+
+            pc_raw = md.get("page_count")
+            if pc_raw is not None:
+                try:
+                    pc = int(pc_raw)
+                    if doc_id not in page_counts:
+                        page_counts[doc_id] = pc
+                except (TypeError, ValueError):
+                    pass
+
+        docs: List[Dict[str, Any]] = []
+        for doc_id, chunk_count in counts.items():
+            docs.append(
+                {
+                    "doc_id": doc_id,
+                    "chunk_count": chunk_count,
+                    "page_count": page_counts.get(doc_id),
+                }
+            )
+
+        self.logger.info("list_documents docs summary: %r", docs[:2])
+        return docs

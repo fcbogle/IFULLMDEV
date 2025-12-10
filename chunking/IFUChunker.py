@@ -54,25 +54,33 @@ class IFUChunker:
             return self.lang_detector.detect(text)
 
     def chunk_document(
-        self,
-        doc_id: str,
-        doc_name: str,
-        pages: List[str],
-        doc_metadata: Optional[Dict[str, Any]] = None,
+            self,
+            doc_id: str,
+            doc_name: str,
+            pages: List[str],
+            doc_metadata: Optional[Dict[str, Any]] = None,
     ) -> List["IFUChunk"]:
 
         # Logger safety
         if not hasattr(self, "logger") or self.logger is None:
             self.logger = logging.getLogger(self.__class__.__name__)
 
-        doc_metadata = doc_metadata or {}
+        # Work with a copy so we can safely mutate metadata
+        base_metadata: Dict[str, Any] = dict(doc_metadata or {})
 
-        version = doc_metadata.get("version")
-        region = doc_metadata.get("region")
-        is_primary_language = doc_metadata.get("is_primary_language", False)
-
+        # Ensure page_count is always present in doc-level metadata
         if not isinstance(pages, list) or not all(isinstance(p, str) for p in pages):
             raise TypeError("`pages` must be List[str] (one string per page).")
+
+        page_count = base_metadata.get("page_count")
+        if page_count is None:
+            page_count = len(pages)
+            base_metadata["page_count"] = page_count
+
+        # Optional convenience fields pulled out of metadata
+        version = base_metadata.get("version")
+        region = base_metadata.get("region")
+        is_primary_language = base_metadata.get("is_primary_language", False)
 
         chunks: List["IFUChunk"] = []
 
@@ -85,7 +93,11 @@ class IFUChunker:
 
         self.logger.info(
             "Chunking doc_id=%s doc_name=%r pages=%d chunk_size=%d overlap=%d",
-            doc_id, doc_name, len(pages), self.chunk_size_tokens, self.overlap_tokens
+            doc_id,
+            doc_name,
+            len(pages),
+            self.chunk_size_tokens,
+            self.overlap_tokens,
         )
 
         for page_index, page_text in enumerate(pages, start=1):
@@ -110,10 +122,17 @@ class IFUChunker:
                 )
 
                 # enforce page fallback if chunk is weak
-                if (lang == "und" or lang_confidence < self.page_fallback_threshold) and page_lang != "und":
-                    lang, lang_confidence, script = page_lang, page_confidence, page_script
+                if (
+                        (lang == "und" or lang_confidence < self.page_fallback_threshold)
+                        and page_lang != "und"
+                ):
+                    lang, lang_confidence, script = (
+                        page_lang,
+                        page_confidence,
+                        page_script,
+                    )
 
-                # compute once for efficiency
+                # character offsets
                 chars_before_len = len(" ".join(tokens[:start_idx]))
                 chunk_char_start = char_offset + chars_before_len
                 chunk_char_end = chunk_char_start + len(chunk_text)
@@ -137,31 +156,31 @@ class IFUChunker:
                     translation_group_id=None,
                 )
 
-                # assumes IFUChunk.metadata is Dict[str, Any]
-                if doc_metadata and isinstance(chunk.metadata, dict):
-                    chunk.metadata.update(doc_metadata)
+                # Attach doc-level metadata (including page_count) to the chunk
+                if base_metadata:
+                    if not isinstance(getattr(chunk, "metadata", None), dict):
+                        chunk.metadata = {}
+                    chunk.metadata.update(base_metadata)
+                    if not chunks:  # first chunk only
+                        self.logger.info("First chunk metadata: %r", chunk.metadata)
 
                 chunks.append(chunk)
 
-                # essential per-chunk logging
+                # Stats
                 chunk_len = len(chunk_text)
                 chunk_lengths.append(chunk_len)
                 lang_counts[lang] += 1
                 lang_conf_vals.append(lang_confidence)
-
-                self.logger.info(
-                    "Chunk created: idx=%d page=%d lang=%s conf=%.2f length=%d chars",
-                    len(chunks), page_index, lang, lang_confidence, chunk_len
-                )
 
                 if end_idx == num_tokens:
                     break
 
                 start_idx = end_idx - self.overlap_tokens
 
+            # Move base offset forward by full page
             char_offset += len(page_text) + 1
 
-        # summary
+        # Summary
         total_chunks = len(chunks)
         if total_chunks:
             avg_len = sum(chunk_lengths) / total_chunks
@@ -169,10 +188,15 @@ class IFUChunker:
 
             self.logger.info(
                 "Chunking Summary: chunks=%d | avg_len=%.1f chars | lang_counts=%s | avg_lang_conf=%.2f",
-                total_chunks, avg_len, dict(lang_counts), avg_conf
+                total_chunks,
+                avg_len,
+                dict(lang_counts),
+                avg_conf,
             )
         else:
-            self.logger.warning("No chunks produced for doc_id=%s doc_name=%r", doc_id, doc_name)
+            self.logger.warning(
+                "No chunks produced for doc_id=%s doc_name=%r", doc_id, doc_name
+            )
 
         return chunks
 

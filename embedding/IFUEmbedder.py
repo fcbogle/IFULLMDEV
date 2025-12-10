@@ -4,7 +4,7 @@
 # Description: IFUEmbedder
 # -----------------------------------------------------------------------------
 import time
-from typing import Optional, List, Iterable, Any, Set, Sequence
+from typing import Optional, List, Iterable, Any, Set, Sequence, Dict
 import logging
 import numpy as np
 from openai import AzureOpenAI, OpenAI
@@ -257,10 +257,6 @@ class IFUEmbedder:
         return np.empty((0, 0), dtype=np.float32)
 
     def embed_chunks(self, chunks: Iterable[Any]) -> List[EmbeddingRecord]:
-        """
-        Filter (lang/empties) → batch → _embed_batch → EmbeddingRecord list.
-        Expects each chunk to have: .text, .chunk_id; optional metadata (doc_id, page_start, etc.).
-        """
         items: List[Any] = []
         for c in chunks:
             if self.filter_lang and getattr(c, "lang", None) not in self.filter_lang:
@@ -283,30 +279,38 @@ class IFUEmbedder:
             try:
                 arr = self._embed_batch(texts)
                 for c, v in zip(batch, arr):
-                    meta = {
-                        "doc_id": getattr(c, "doc_id", None),
-                        "doc_name": getattr(c, "doc_name", None),
-                        "page_start": getattr(c, "page_start", None),
-                        "page_end": getattr(c, "page_end", None),
-                        "char_start": getattr(c, "char_start", None),
-                        "char_end": getattr(c, "char_end", None),
-                        "lang": getattr(c, "lang", None),
-                        "lang_confidence": float(getattr(c, "lang_confidence", 0.0)),
-                        "version": getattr(c, "version", None),
-                        "region": getattr(c, "region", None),
-                    }
+                    # 1) Start from chunk.metadata (doc_metadata from _process_single_pdf)
+                    meta: Dict[str, Any] = {}
                     extra = getattr(c, "metadata", None)
                     if isinstance(extra, dict):
-                        meta = {**extra, **meta}
+                        meta.update(extra)  # <- includes page_count, blob_name, container, etc.
 
-                        out.append(EmbeddingRecord(
+                    # 2) Only set defaults if missing
+                    meta.setdefault("doc_id", getattr(c, "doc_id", None))
+                    meta.setdefault("doc_name", getattr(c, "doc_name", None))
+                    meta.setdefault("page_start", getattr(c, "page_start", None))
+                    meta.setdefault("page_end", getattr(c, "page_end", None))
+                    meta.setdefault("char_start", getattr(c, "char_start", None))
+                    meta.setdefault("char_end", getattr(c, "char_end", None))
+                    meta.setdefault("lang", getattr(c, "lang", None))
+                    meta.setdefault(
+                        "lang_confidence",
+                        float(getattr(c, "lang_confidence", 0.0)),
+                    )
+                    meta.setdefault("version", getattr(c, "version", None))
+                    meta.setdefault("region", getattr(c, "region", None))
+
+                    out.append(
+                        EmbeddingRecord(
                             chunk_id=getattr(c, "chunk_id"),
                             vector=v,
                             text=c.text,
                             metadata=meta,
-                        ))
+                        )
+                    )
             except Exception as e:
                 self.logger.error(f"Embedding batch at offset {i} failed: {e}")
 
         self.logger.info(f"Completed embeddings for {len(out)} chunks.")
         return out
+

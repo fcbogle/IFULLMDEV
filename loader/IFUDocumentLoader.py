@@ -15,6 +15,7 @@ from config.Config import Config
 from embedding.IFUEmbedder import IFUEmbedder
 from extractor.IFUTextExtractor import IFUTextExtractor
 from ingestion.IFUFileLoader import IFUFileLoader
+from loader.types import IFUStatsDict, DocumentEntry, BlobEntry
 from utility.logging_utils import get_class_logger
 from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
 from vectorstore.IFUVectorStore import IFUVectorStore
@@ -22,7 +23,7 @@ from vectorstore.IFUVectorStore import IFUVectorStore
 
 class IFUDocumentLoader:
     cfg: Config
-    collection_name: str = "ifu_chunks_all"
+    collection_name: str = "ifu-docs-test"
     loader: IFUFileLoader = field(init=False)
     chunker: IFUChunker = field(init=False)
     embedder: IFUEmbedder = field(init=False)
@@ -34,7 +35,7 @@ class IFUDocumentLoader:
     def __init__(self,
                  cfg: Config,
                  *,
-                 collection_name: str = "ifu_chunks",
+                 collection_name: str = "ifu-docs-test",
                  lang_detector: Any = None,
                  logger: logging.Logger | None = None
                  ):
@@ -133,7 +134,7 @@ class IFUDocumentLoader:
     def ingest_blob_pdfs(self,
                          blob_names: Iterable[str],
                          *,
-                         container: str = "ifu_docs",
+                         container: str = "ifu-docs-test",
                          ) -> int:
         """
         Ingest existing PDFs from Azure Blob into the vector store.
@@ -174,68 +175,85 @@ class IFUDocumentLoader:
                 )
         return ingested_count
 
-    def _process_single_pdf(self,
-                            *,
-                            container: str,
-                            blob_name: str,
-                            source_path: Path | None = None,
-                            ) -> None:
+    def _process_single_pdf(
+            self,
+            *,
+            container: str,
+            blob_name: str,
+            source_path: Path | None = None,
+    ) -> None:
         """
         Process a single PDF already present in Blob Storage.
 
         Steps:
           - Download PDF bytes
-          - Extract text
+          - Extract text / pages
           - Chunk (with language detection)
-          - Add chunks to vector store
-
+          - Embed & add chunks to vector store
         """
         self.logger.info(
-        "processing blob '%s' from container '%s' into collection '%s", blob_name, container, self.collection_name
+            "Processing blob '%s' from container '%s' into collection '%s'",
+            blob_name,
+            container,
+            self.collection_name,
         )
 
-        # Download PDF from blob storage
+        # 1) Download PDF from blob storage
         pdf_bytes = self.loader.load_document(blob_name=blob_name, container=container)
         if not pdf_bytes:
-            raise ValueError(f"No bytes returned for blob '{blob_name}' from container '{container}'")
+            raise ValueError(
+                f"No bytes returned for blob '{blob_name}' from container '{container}'"
+            )
 
-        # Extract text from PDF bytes
-        text = self.extractor.extract_text_from_pdf(pdf_bytes)
+        # 2) Extract text/pages
+        raw = self.extractor.extract_text_from_pdf(pdf_bytes)
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError(f"Empty text extracted for blob '{blob_name}'")
-
-        # Get per page text
-        pages: List[str]
-        if hasattr(self.extractor, "extract_pages"):
-            pages = self.extractor.extract_pages(pdf_bytes)
-            if not isinstance(pages, list) or not all(isinstance(p, str) for p in pages):
-                self.logger.warning(
-                    "Page extraction returned invalid format for blob '%s'; "
-                    "falling back to single page.",
-                    blob_name,
-                )
-                pages = [text]
+        # Normalise raw -> pages: List[str]
+        if isinstance(raw, list) and all(isinstance(p, str) for p in raw):
+            pages: List[str] = raw
+        elif isinstance(raw, list) and all(isinstance(p, list) for p in raw):
+            # List[List[str]] – e.g., paragraphs per page -> join inner lists
+            pages = [
+                " ".join(part for part in page if isinstance(part, str))
+                for page in raw
+            ]
+        elif isinstance(raw, str):
+            if not raw.strip():
+                raise ValueError(f"Empty text extracted for blob '{blob_name}'")
+            pages = [raw]
         else:
-            pages = [text]
+            raise TypeError(
+                f"Unexpected type from extract_text_from_pdf: {type(raw)}; "
+                f"expected str | List[str] | List[List[str]]"
+            )
 
+        page_count = len(pages)
+        self.logger.info(
+            "Blob '%s' has %d pages according to extractor",
+            blob_name,
+            page_count,
+        )
 
-        # Build IDs and metadata for chunker
-        doc_id = blob_name  # simple, stable ID; can be changed later if needed
+        # 3) Build IDs and metadata for chunker
+        doc_id = blob_name
         doc_name = source_path.name if source_path is not None else blob_name
 
         doc_metadata: Dict[str, Any] = {
             "blob_name": blob_name,
             "container": container,
+            "filename": source_path.name if source_path is not None else blob_name,
+            "page_count": page_count,
         }
         if source_path is not None:
             doc_metadata["source_path"] = str(source_path)
-            doc_metadata["filename"] = source_path.name
-        else:
-            doc_metadata["filename"] = blob_name
 
-        # Chunk the document
-        chunks = self.chunker.chunk_document(doc_id=doc_id, doc_name=doc_name, pages=pages, doc_metadata=doc_metadata)
+        # 4) Chunk the document
+        chunks = self.chunker.chunk_document(
+            doc_id=doc_id,
+            doc_name=doc_name,
+            pages=pages,
+            doc_metadata=doc_metadata,
+        )
 
         if not chunks:
             self.logger.warning(
@@ -253,7 +271,7 @@ class IFUDocumentLoader:
             doc_name,
         )
 
-        # Embed chunks using IFUEmbedder
+        # 5) Embed chunks
         embedding_records = self.embedder.embed_chunks(chunks)
         if not embedding_records:
             self.logger.warning(
@@ -264,15 +282,135 @@ class IFUDocumentLoader:
             )
             return
 
-        # Check length of embedding records prior to upsert
         if len(embedding_records) != len(chunks):
-            self.logger.error("Embedding records length mismatch: %d != %d", len(embedding_records), len(chunks))
-            raise ValueError(f"Expected {len(chunks)} embedding records, got {len(embedding_records)}")
+            self.logger.error(
+                "Embedding records length mismatch: %d != %d",
+                len(embedding_records),
+                len(chunks),
+            )
+            raise ValueError(
+                f"Expected {len(chunks)} embedding records, got {len(embedding_records)}"
+            )
 
-        # Upsert chunks and records into Chroma vector store
+        # 6) Upsert into Chroma
         self.store.upsert_chunk_embeddings(doc_id, chunks, records=embedding_records)
 
         self.logger.info(
-            "Successfully ingested blob '%s' into collection '%s'", blob_name, self.collection_name
+            "Successfully ingested blob '%s' into collection '%s'",
+            blob_name,
+            self.collection_name,
         )
 
+    def get_blob_details(self, container: str) -> list[dict[str, Any]]:
+        """
+        Return detailed metadata for each blob in the container.
+
+        Example format:
+        {
+            "blob_name": "example.pdf",
+            "size": 1234,
+            "content_type": "application/pdf",
+            "last_modified": "2025-12-08T18:47:36+00:00"
+        }
+        """
+        details = []
+
+        container_client = self.loader.blob_service.get_container_client(container)
+
+        for blob in container_client.list_blobs():
+            size = getattr(blob, "size", None)
+            last_modified = getattr(blob, "last_modified", None)
+
+            # content type can be in content_settings
+            content_type = None
+            if hasattr(blob, "content_settings") and blob.content_settings:
+                content_type = blob.content_settings.content_type
+
+            # some SDK versions keep content type in blob.properties
+            elif hasattr(blob, "properties") and isinstance(blob.properties, dict):
+                content_type = blob.properties.get("content_type")
+
+            details.append({
+                "blob_name": blob.name,
+                "size": size,
+                "content_type": content_type,
+                "last_modified": last_modified.isoformat() if last_modified else None,
+            })
+
+        self.logger.info(
+            "get_blob_details: container=%s -> %d blobs",
+            container,
+            len(details),
+        )
+
+        return details
+
+    def get_stats(self, blob_container: str = "ifu-docs-test") -> IFUStatsDict:
+        self.logger.info(
+            "Stats for collection='%s', blob_container='%s'",
+            self.collection_name,
+            blob_container,
+        )
+
+        # --- Chroma / embeddings ---
+        try:
+            total_chunks = self.store.collection.count()
+        except Exception as e:
+            self.logger.error(
+                "Failed to count Chroma collection '%s': %s",
+                self.collection_name,
+                e,
+            )
+            total_chunks = 0
+
+        docs_raw = self.store.list_documents()
+
+        documents: List[DocumentEntry] = []
+        for d in docs_raw:
+            if not isinstance(d, dict):
+                continue
+            doc_id = d.get("doc_id")
+            chunk_count = d.get("chunk_count")
+            page_count = d.get("page_count")
+
+            if isinstance(doc_id, str) and isinstance(chunk_count, int):
+                documents.append(
+                    DocumentEntry(
+                        doc_id=doc_id,
+                        chunk_count=chunk_count,
+                        page_count=page_count if page_count is not None else None,
+                    )
+                )
+
+        # --- Blob side (unchanged) ---
+        blobs: List[BlobEntry] = []
+        try:
+            raw = self.loader.list_documents(container=blob_container)
+            if isinstance(raw, list) and raw:
+                if all(isinstance(x, str) for x in raw):
+                    blobs = [BlobEntry(blob_name=name) for name in raw]
+                elif all(isinstance(x, dict) for x in raw):
+                    for item in raw:
+                        name = item.get("blob_name") or item.get("name")
+                        if not isinstance(name, str):
+                            continue
+                        blobs.append(BlobEntry(blob_name=name))
+            else:
+                self.logger.info(
+                    "No blobs reported by IFUFileLoader.list_documents for container '%s'",
+                    blob_container,
+                )
+        except Exception as e:
+            self.logger.error(
+                "Error while listing blobs for container '%s': %s",
+                blob_container,
+                e,
+            )
+
+        return IFUStatsDict(
+            collection_name=self.collection_name,
+            total_chunks=total_chunks,
+            documents=documents,
+            blob_container=blob_container,
+            blobs=blobs,
+        )
