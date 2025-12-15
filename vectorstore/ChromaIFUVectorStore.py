@@ -281,6 +281,8 @@ class ChromaIFUVectorStore(IFUVectorStore):
 
         counts = Counter()
         page_counts: Dict[str, int] = {}
+        doc_types: Dict[str, str] = {}
+        last_modifieds: Dict[str, str] = {}
 
         offset = 0
         seen = 0
@@ -324,6 +326,16 @@ class ChromaIFUVectorStore(IFUVectorStore):
                     except (TypeError, ValueError):
                         pass
 
+                # document_type (new)
+                dt = md.get("document_type")
+                if isinstance(dt, str) and dt.strip() and doc_id not in doc_types:
+                    doc_types[doc_id] = dt.strip()
+
+                # last_modified (new) - keep ISO string
+                lm = md.get("last_modified")
+                if isinstance(lm, str) and lm.strip() and doc_id not in last_modifieds:
+                    last_modifieds[doc_id] = lm.strip()
+
             batch_len = len(metadatas)
             seen += batch_len
             offset += batch_len
@@ -339,6 +351,8 @@ class ChromaIFUVectorStore(IFUVectorStore):
                     "doc_id": doc_id,
                     "chunk_count": chunk_count,
                     "page_count": page_counts.get(doc_id),
+                    "document_type": doc_types.get(doc_id),
+                    "last_modified": last_modifieds.get(doc_id),
                 }
             )
 

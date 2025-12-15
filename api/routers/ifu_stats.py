@@ -30,6 +30,8 @@ def get_ifu_stats(
             doc_id=d["doc_id"],
             chunk_count=d["chunk_count"],
             page_count=d.get("page_count"),
+            last_modified=d.get("last_modified"),
+            document_type=d.get("document_type"),
         )
         for d in stats["documents"]
     ]

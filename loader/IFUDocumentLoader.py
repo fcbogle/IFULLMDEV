@@ -198,14 +198,14 @@ class IFUDocumentLoader:
             self.collection_name,
         )
 
-        # 1) Download PDF from blob storage
+        # Download PDF from blob storage
         pdf_bytes = self.loader.load_document(blob_name=blob_name, container=container)
         if not pdf_bytes:
             raise ValueError(
                 f"No bytes returned for blob '{blob_name}' from container '{container}'"
             )
 
-        # 2) Extract text/pages
+        # Extract text/pages
         raw = self.extractor.extract_text_from_pdf(pdf_bytes)
 
         # Normalise raw -> pages: List[str]
@@ -234,7 +234,21 @@ class IFUDocumentLoader:
             page_count,
         )
 
-        # 3) Build IDs and metadata for chunker
+        properties = None
+        try:
+            container_client = self.loader.blob_service.get_container_client(container)
+            blob_client = container_client.get_blob_client(blob_name)
+            properties = blob_client.get_blob_properties()
+        except Exception:
+            pass
+
+        last_modified = None
+        if properties:
+            last_modified = properties.last_modified.isoformat()
+
+        doc_type = "IFU"
+
+        # Build IDs and metadata for chunker
         doc_id = blob_name
         doc_name = source_path.name if source_path is not None else blob_name
 
@@ -243,11 +257,16 @@ class IFUDocumentLoader:
             "container": container,
             "filename": source_path.name if source_path is not None else blob_name,
             "page_count": page_count,
+            "last_modified": last_modified,
+            "document_type": doc_type,
         }
         if source_path is not None:
             doc_metadata["source_path"] = str(source_path)
 
-        # 4) Chunk the document
+        # Check metadata prior to chunking the document
+        self.logger.info("Doc metadata before chunking: %r", doc_metadata)
+
+        # Chunk the document
         chunks = self.chunker.chunk_document(
             doc_id=doc_id,
             doc_name=doc_name,
@@ -271,7 +290,7 @@ class IFUDocumentLoader:
             doc_name,
         )
 
-        # 5) Embed chunks
+        # Embed chunks
         embedding_records = self.embedder.embed_chunks(chunks)
         if not embedding_records:
             self.logger.warning(
@@ -292,7 +311,7 @@ class IFUDocumentLoader:
                 f"Expected {len(chunks)} embedding records, got {len(embedding_records)}"
             )
 
-        # 6) Upsert into Chroma
+        # Upsert into Chroma
         self.store.upsert_chunk_embeddings(doc_id, chunks, records=embedding_records)
 
         self.logger.info(
@@ -372,6 +391,8 @@ class IFUDocumentLoader:
             doc_id = d.get("doc_id")
             chunk_count = d.get("chunk_count")
             page_count = d.get("page_count")
+            doc_last_modified = d.get("last_modified")
+            doc_type = d.get("document_type")
 
             if isinstance(doc_id, str) and isinstance(chunk_count, int):
                 documents.append(
@@ -379,6 +400,8 @@ class IFUDocumentLoader:
                         doc_id=doc_id,
                         chunk_count=chunk_count,
                         page_count=page_count if page_count is not None else None,
+                        last_modified=doc_last_modified if doc_last_modified is not None else None,
+                        document_type=doc_type if isinstance(doc_type, str) else None,
                     )
                 )
 

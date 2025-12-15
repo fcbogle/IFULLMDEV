@@ -3,6 +3,7 @@
 # Created: 2025-12-07
 # Description: ifu_stats.py
 # -----------------------------------------------------------------------------
+from datetime import datetime
 from typing import Optional, List
 
 from pydantic import BaseModel
@@ -12,6 +13,9 @@ class DocumentStats(BaseModel):
     doc_id: str
     chunk_count: int
     page_count: int | None = None
+    last_modified: Optional[datetime] = None
+    document_type: Optional[str] = None
+
 class BlobStats(BaseModel):
     blob_name: str
     size: Optional[int] = None

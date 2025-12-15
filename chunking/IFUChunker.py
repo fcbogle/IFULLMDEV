@@ -77,6 +77,25 @@ class IFUChunker:
             page_count = len(pages)
             base_metadata["page_count"] = page_count
 
+        # Ensure document_type and last_modifiled are included in metadata
+        doc_type = base_metadata.get("document_type")
+        if not isinstance(doc_type, str) or not doc_type.strip():
+            base_metadata["document_type"] = "unknown"
+        else:
+            base_metadata["document_type"] = doc_type.strip()
+
+        lm = base_metadata.get("last_modified")
+        if lm is None:
+            base_metadata["last_modified"] = None
+        elif isinstance(lm, str):
+            base_metadata["last_modified"] = lm.strip() or None
+        else:
+            # tolerate datetime or other objects
+            try:
+                base_metadata["last_modified"] = lm.isoformat()  # datetime-like
+            except Exception:
+                base_metadata["last_modified"] = str(lm)
+
         # Optional convenience fields pulled out of metadata
         version = base_metadata.get("version")
         region = base_metadata.get("region")
