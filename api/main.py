@@ -6,6 +6,8 @@
 from fastapi import FastAPI
 from api.routers import health, ifu_stats
 
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",)
 app = FastAPI(title="IFULLMDEV API")
 app.include_router(health.router)
 app.include_router(ifu_stats.router)

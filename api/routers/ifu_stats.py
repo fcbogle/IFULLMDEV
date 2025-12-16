@@ -10,14 +10,14 @@ from fastapi import APIRouter, Depends, Query
 from api.schemas.ifu_stats import IFUStatsResponse, DocumentStats, BlobStats
 from api.dependencies import get_multi_doc_loader
 
-logger = logging.getLogger("ifu_stats")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/ifu",
+    prefix="/stats",
     tags=["stats"]
 )
 
-@router.get("/stats", response_model=IFUStatsResponse)
+@router.get("", response_model=IFUStatsResponse)
 def get_ifu_stats(
     loader = Depends(get_multi_doc_loader),
     blob_container: str = Query("ifu-docs-test", description="Blob container to inspect"),
@@ -36,7 +36,12 @@ def get_ifu_stats(
         for d in stats["documents"]
     ]
 
-    blob_entries = loader.get_blob_details(blob_container)
+    try:
+        blob_entries = loader.get_blob_details(blob_container)
+        logger.info("Blob entries: %r", blob_entries)
+    except Exception as e:
+        logger.exception("Failed to get blob details: %s", e)
+        raise
 
     blobs = [
         BlobStats(

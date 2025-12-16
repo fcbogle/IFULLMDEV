@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any, List
 @dataclass
 class IFUChunk:
     """
-    Represents a single semantically coherent chunk of text extracted from an AFU document.
+    Represents a single semantically coherent chunk of text extracted from an IFU document.
     Includes language information and metadata for traceability, filtering, and vector storage.
     """
 
@@ -43,7 +43,7 @@ class IFUChunk:
     def to_metadata(self) -> Dict[str, Any]:
         # Convert the chunk to a metadata dictionary suitable for Chroma or JSON storage.
         # Embedding is intentionally excluded to avoid large payloads
-        r"""
+        """
         Converts the chunk into a metadata dictionary suitable for Chroma/JSON storage.
         The embedding is omitted to reduce payload size.
         """
