@@ -6,21 +6,23 @@
 from datetime import datetime
 from typing import Optional, List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DocumentStats(BaseModel):
     doc_id: str
     chunk_count: int
     page_count: int | None = None
-    last_modified: Optional[datetime] = None
-    document_type: Optional[str] = None
+    last_modified: datetime | None = None
+    document_type: str | None = None
+
 
 class BlobStats(BaseModel):
     blob_name: str
-    size: Optional[int] = None
-    content_type: Optional[str] = None
-    last_modified: Optional[str] = None
+    size: int | None = None
+    content_type: str | None = None
+    last_modified: datetime | None = None  # keep consistent
+
 
 class IFUStatsResponse(BaseModel):
     collection_name: str
@@ -29,7 +31,7 @@ class IFUStatsResponse(BaseModel):
     documents: List[DocumentStats]
 
     # blob stats
-    blob_container: Optional[str] = None
+    blob_container: str | None = None
     total_blobs: int = 0
-    blobs: List[BlobStats] = []
+    blobs: List[BlobStats] = Field(default_factory=list)
 

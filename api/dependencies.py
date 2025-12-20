@@ -5,14 +5,31 @@
 # -----------------------------------------------------------------------------
 from functools import lru_cache
 
+from api.AppContainer import app_container
 from config.Config import Config
-from loader.IFUDocumentLoader import IFUDocumentLoader
+from services.IFUHealthService import IFUHealthService
+from services.IFUQueryService import IFUQueryService
+from services.IFUStatsService import IFUStatsService
+from loader.IFUDocumentLoader import IFUDocumentLoader  # or IFUMultiDocumentLoader
 
 
 @lru_cache
 def get_cfg() -> Config:
     return Config.from_env()
 
-@lru_cache
+
 def get_multi_doc_loader() -> IFUDocumentLoader:
-    return IFUDocumentLoader(cfg=get_cfg())
+    # already a singleton in app_container; caching is optional
+    return app_container.multi_doc_loader
+
+def get_health_service() -> IFUHealthService:
+    # use the singleton service from the container
+    return app_container.health_service
+
+def get_stats_service() -> IFUStatsService:
+    # use the singleton service from the container
+    return app_container.stats_service
+
+def get_query_service() -> IFUQueryService:
+    # use the singleton service from the container
+    return app_container.query_service
