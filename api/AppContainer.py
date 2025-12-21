@@ -3,61 +3,72 @@
 # Created: 2025-12-20
 # Description: AppContainer.py
 # -----------------------------------------------------------------------------
-from typing import Any
+
+from config.Config import Config
 
 from chunking.LangDetectDetector import LangDetectDetector
-from health.TestRunner import TestRunner
-from config.Config import Config
 from embedding.IFUEmbedder import IFUEmbedder
-from loader.IFUDocumentLoader import IFUDocumentLoader
+from extractor.IFUTextExtractor import IFUTextExtractor
 from services.IFUHealthService import IFUHealthService
+from services.IFUIngestService import IFUIngestService
 from services.IFUQueryService import IFUQueryService
-from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
 from services.IFUStatsService import IFUStatsService
+from health.TestRunner import TestRunner
+from loader.IFUDocumentLoader import IFUDocumentLoader
+from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
 
 
 class AppContainer:
     """
     Owns heavy object instantiation and application wiring.
-
-    This container is instantiated once at startup and provides
-    singleton instances to FastAPI dependencies.
+    Singleton instances are provided via FastAPI dependencies.
     """
 
-    def __init__(self, lang_detector: Any | None = None) -> None:
+    def __init__(self) -> None:
         # Configuration
         self.cfg = Config.from_env()
 
-        # Smoke Test TestRunner
+        # Smoke tests / health
         self.test_runner = TestRunner(cfg=self.cfg)
 
         # Core infrastructure
         self.embedder = IFUEmbedder(cfg=self.cfg)
         self.store = ChromaIFUVectorStore(cfg=self.cfg, embedder=self.embedder)
-        self.lang_detector = lang_detector or LangDetectDetector()
 
-        # Provides a singleton IFUDocumentLoader instance
-        self.multi_doc_loader = IFUDocumentLoader(
-            cfg=self.cfg,
+        # Blob access (thin loader)
+        self.document_loader = IFUDocumentLoader(cfg=self.cfg)
+
+        # Chunking / extraction for ingestion
+        self.lang_detector = LangDetectDetector()
+        self.chunker = IFUIngestService.build_default_chunker(lang_detector=self.lang_detector)
+        self.extractor = IFUTextExtractor()
+
+        # Return a singleton IFUHealthService instance
+        self.health_service = IFUHealthService(test_runner=self.test_runner)
+
+        # Return a singleton IFUIngestService instance
+        self.ingest_service = IFUIngestService(
+            document_loader=self.document_loader,
+            store=self.store,
+            embedder=self.embedder,
+            chunker=self.chunker,
+            extractor=self.extractor,
             collection_name="ifu-docs-test",
-            lang_detector=self.lang_detector,
         )
 
-        # Provides a singleton IFUStatsService instance
+        # Return a singleton IFUStatsService instance
         self.stats_service = IFUStatsService(
-            loader=self.multi_doc_loader
+            document_loader=self.document_loader,
+            store=self.store,
+            collection_name="ifu-docs-test",
         )
 
-        # Provides a singleton IFUQueryService instance
+        # Return a singleton IFUQueryService instance
         self.query_service = IFUQueryService(
             store=self.store,
             collection_name="ifu-docs-test",
         )
 
-        # Provides a singleton IFUHealthService instance
-        self.health_service = IFUHealthService(
-            test_runner=self.test_runner
-        )
-
 # Singleton container instance
 app_container = AppContainer()
+

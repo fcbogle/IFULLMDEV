@@ -31,6 +31,7 @@ def _build_cfg_or_skip(pdf_path: Path):
     """
     try:
         cfg = Config(
+            ifu_sample_folder=os.getenv("IFU_SAMPLE_FOLDER"),
             ifu_sample_pdf=os.getenv("IFU_SAMPLE_PDF"),
             storage_account=os.getenv("AZURE_STORAGE_ACCOUNT"),
             storage_key=os.getenv("AZURE_STORAGE_KEY"),
