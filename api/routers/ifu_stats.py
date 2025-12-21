@@ -23,4 +23,5 @@ def get_ifu_stats(
     svc: IFUStatsService = Depends(get_stats_service),
     blob_container: str = Query("ifu-docs-test"),
 ) -> IFUStatsResponse:
+    logger.info("Getting stats for blob_container='%s'", blob_container)
     return svc.get_stats(blob_container=blob_container)

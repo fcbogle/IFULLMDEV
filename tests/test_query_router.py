@@ -3,11 +3,14 @@
 # Created: 2025-12-20
 # Description: test_query_router.py
 # -----------------------------------------------------------------------------
+import logging
+
 import pytest
 from starlette.testclient import TestClient
 
 from api.main import app
 
+logger = logging.getLogger(__name__)
 
 @pytest.mark.integration
 def test_post_query_endpoint():
@@ -16,17 +19,18 @@ def test_post_query_endpoint():
     resp = client.post(
         "/query",
         json={
-            "query": "noise from knee",
+            "query": "oil leak from device",
             "n_results": 3,
         },
     )
 
-    # ---- diagnostics (crucial while stabilising the API) ----
+    # ---- diagnostics (crucial while stabilizing the API) ----
     print("\nSTATUS:", resp.status_code)
     print("HEADERS:", resp.headers)
     try:
         print("RESPONSE JSON:", resp.json())
-    except Exception:
+    except Exception as e:
+        logger.exception("Response failed: %s", e)
         print("RESPONSE TEXT:", resp.text)
 
     # ---- assertions ----
