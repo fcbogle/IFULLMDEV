@@ -38,7 +38,7 @@ class AppContainer:
         # Blob access (thin loader)
         self.document_loader = IFUDocumentLoader(cfg=self.cfg)
 
-        # Chunking / extraction for ingestion
+        # Infrastructure for ingestion pipeline
         self.lang_detector = LangDetectDetector()
         self.chunker = IFUIngestService.build_default_chunker(lang_detector=self.lang_detector)
         self.extractor = IFUTextExtractor()
