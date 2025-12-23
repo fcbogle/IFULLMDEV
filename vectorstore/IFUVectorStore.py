@@ -15,6 +15,9 @@ class IFUVectorStore(Protocol):
     def test_connection(self) -> bool:
         ...
 
+    def list_documents(self) -> list[dict[str, Any]]:
+        ...
+
     @abstractmethod
     def upsert_chunk_embeddings(
             self,

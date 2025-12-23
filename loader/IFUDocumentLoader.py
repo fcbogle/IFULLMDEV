@@ -80,24 +80,63 @@ class IFUDocumentLoader:
         details: list[dict[str, Any]] = []
         container_client = self.file_loader.blob_service.get_container_client(container)
 
-        for blob in container_client.list_blobs():
+        self.logger.info("get_blob_details: container='%s' (start)", container)
+
+        for blob in container_client.list_blobs(include=["metadata"]):
             blob_name = blob.name
             size = getattr(blob, "size", None)
             last_modified = getattr(blob, "last_modified", None)
 
-            # Best effort: fetch properties for content_type (and sometimes last_modified)
+            # --- metadata from list_blobs (may be None or {})
+            metadata = getattr(blob, "metadata", None)
+            self.logger.info(
+                "list_blobs: blob='%s' metadata=%r",
+                blob_name,
+                metadata,
+            )
+
             content_type = None
+
             try:
                 blob_client = container_client.get_blob_client(blob_name)
                 props = blob_client.get_blob_properties()
-                if props and getattr(props, "content_settings", None):
+
+                # --- content type
+                if getattr(props, "content_settings", None):
                     content_type = props.content_settings.content_type
-                if props and getattr(props, "last_modified", None):
+
+                # --- authoritative last_modified / size
+                if getattr(props, "last_modified", None):
                     last_modified = props.last_modified
-                if props and getattr(props, "size", None) is not None:
+                if getattr(props, "size", None) is not None:
                     size = props.size
-            except Exception:
-                pass
+
+                # --- metadata from blob properties (most reliable)
+                props_metadata = getattr(props, "metadata", None)
+                self.logger.info(
+                    "get_blob_properties: blob='%s' metadata=%r",
+                    blob_name,
+                    props_metadata,
+                )
+
+                if isinstance(props_metadata, dict) and props_metadata:
+                    # normalise to str -> str
+                    metadata = {str(k): str(v) for k, v in props_metadata.items()}
+                elif not metadata:
+                    metadata = None
+
+            except Exception as e:
+                self.logger.warning(
+                    "Failed to read blob properties for '%s': %s",
+                    blob_name,
+                    e,
+                )
+
+            self.logger.info(
+                "final blob detail: blob='%s' blob_metadata=%r",
+                blob_name,
+                metadata,
+            )
 
             details.append(
                 {
@@ -105,10 +144,15 @@ class IFUDocumentLoader:
                     "size": size,
                     "content_type": content_type,
                     "last_modified": last_modified.isoformat() if last_modified else None,
+                    "blob_metadata": metadata or {},
                 }
             )
 
-        self.logger.info("get_blob_details: container=%s -> %d blobs", container, len(details))
+        self.logger.info(
+            "get_blob_details: container='%s' -> %d blobs (done)",
+            container,
+            len(details),
+        )
         return details
 
     def load_blob_bytes(self, *, container: str, blob_name: str) -> bytes:

@@ -7,6 +7,7 @@ from functools import lru_cache
 
 from api.AppContainer import app_container
 from config.Config import Config
+from services.IFUDocumentService import IFUDocumentService
 from services.IFUHealthService import IFUHealthService
 from services.IFUQueryService import IFUQueryService
 from services.IFUStatsService import IFUStatsService
@@ -31,3 +32,6 @@ def get_multi_doc_loader() -> IFUDocumentLoader:
 def get_query_service() -> IFUQueryService:
     # use the singleton service from the container
     return app_container.query_service
+
+def get_document_service() -> IFUDocumentService:
+    return app_container.document_service

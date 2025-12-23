@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------------
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Iterable
+from typing import Dict, Any, Optional, Iterable, List
 
 from loader.IFUDocumentLoader import IFUDocumentLoader
 from services.IFUIngestService import IFUIngestService
@@ -35,16 +35,60 @@ class IFUDocumentService:
         self.logger.info("IFUDocumentService initialised successfully (loader=%s, ingest=%s, store=%s)",
                          type(document_loader).__name__, type(ingest_service).__name__, type(store).__name__)
 
+    from typing import Any, Dict, List
+
     def list_documents(self, *, container: str) -> list[Dict[str, Any]]:
-        # Get details (size/content_type/last_modified) for API usefulness
+        self.logger.info("list_documents: container='%s' (start)", container)
         try:
-            details = self.document_loader.get_blob_details(container=container)
-            # Enforce convention doc_id == blob_name
-            for d in details:
-                d["doc_id"] = d["blob_name"]
-                d["container"] = container
-                self.logger.info("list_documents: container='%s' -> %d documents (done)", container, len(details),)
-            return details
+            # Blob view
+            blob_details = self.document_loader.get_blob_details(container=container)
+            blob_by_id: Dict[str, Dict[str, Any]] = {}
+            for b in blob_details:
+                doc_id = b.get("blob_name")
+                if isinstance(doc_id, str):
+                    blob_by_id[doc_id] = b
+
+            # Index view (from your store, same as /stats uses)
+            # If IFUVectorStore Protocol doesn't yet expose it, add list_documents() to the Protocol too.
+            index_docs_raw = []
+            if hasattr(self.store, "list_documents"):
+                index_docs_raw = self.store.list_documents()  # type: ignore[attr-defined]
+
+            index_by_id: Dict[str, Dict[str, Any]] = {}
+            for d in index_docs_raw:
+                if isinstance(d, dict) and isinstance(d.get("doc_id"), str):
+                    index_by_id[d["doc_id"]] = d
+
+            # Merge (blob is authoritative for blob fields; index adds “metadata”)
+            merged: List[Dict[str, Any]] = []
+            for doc_id, b in blob_by_id.items():
+                idx = index_by_id.get(doc_id, {})
+
+                out: Dict[str, Any] = {
+                    "doc_id": doc_id,
+                    "container": container,
+
+                    # blob fields
+                    "blob_name": b.get("blob_name"),
+                    "size": b.get("size"),
+                    "content_type": b.get("content_type"),
+                    "blob_last_modified": b.get("last_modified"),
+                    "blob_metadata": b.get("blob_metadata"),
+
+                    # index fields
+                    "chunk_count": idx.get("chunk_count"),
+                    "page_count": idx.get("page_count"),
+                    "document_type": idx.get("document_type"),
+                    "indexed_last_modified": idx.get("last_modified"),
+
+                    # derived
+                    "is_indexed": bool(idx),
+                }
+                merged.append(out)
+
+            self.logger.info("list_documents: container='%s' -> %d documents (done)", container, len(merged))
+            return merged
+
         except Exception as e:
             self.logger.error("list_documents: container='%s' -> failed: %s", container, e, exc_info=True)
             raise
@@ -60,26 +104,87 @@ class IFUDocumentService:
             self.logger.error("list_document_ids: container='%s' -> failed: %s", container, e, exc_info=True)
             raise
 
+    from typing import Any, Dict, Optional
+
     def get_document(self, *, container: str, doc_id: str) -> Dict[str, Any]:
         self.logger.info("get_document: container='%s' doc_id='%s' (start)", container, doc_id)
         try:
-            docs = self.document_loader.get_blob_details(container=container)
-            match = next((d for d in docs if d.get("blob_name") == doc_id), None)
+            # Blob side: authoritative for blob existence + blob metadata
+            blobs = self.document_loader.get_blob_details(container=container)
+            blob_match = next((b for b in blobs if b.get("blob_name") == doc_id), None)
 
-            if not match:
-                self.logger.warning("get_document: container='%s' doc_id='%s' -> not found", container, doc_id)
+            if not blob_match:
+                self.logger.warning(
+                    "get_document: container='%s' doc_id='%s' -> not found in blob store",
+                    container,
+                    doc_id,
+                )
                 raise KeyError(f"No document found with doc_id={doc_id} in container={container}")
 
-            match["doc_id"] = doc_id
-            match["container"] = container
+            # Normalize / enrich blob result
+            document: Dict[str, Any] = dict(blob_match)  # copy so we don't mutate original list item
+            document["doc_id"] = doc_id
+            document["container"] = container
+
+            # Ensure expected keys exist (helps Pydantic + stable API output)
+            document.setdefault("blob_metadata", {})
+            document.setdefault("blob_last_modified", document.get("last_modified"))
+
+            #  Chroma side: authoritative for indexing stats (chunks/pages/etc.)
+
+            chroma_doc: Optional[Dict[str, Any]] = None
+            try:
+                docs_raw = self.store.list_documents()  # same as IFUStatsService
+                chroma_doc = next(
+                    (d for d in docs_raw if isinstance(d, dict) and d.get("doc_id") == doc_id),
+                    None,
+                )
+            except Exception as e:
+                # Don't fail the endpoint if Chroma is down; return blob-only response
+                self.logger.warning(
+                    "get_document: container='%s' doc_id='%s' -> could not query Chroma: %s",
+                    container,
+                    doc_id,
+                    e,
+                    exc_info=True,
+                )
+
+            # Merge Chroma fields if present
+            if chroma_doc:
+                # Only overwrite when Chroma has a real value
+                def _set_if_present(key: str, dest_key: Optional[str] = None) -> None:
+                    k = dest_key or key
+                    val = chroma_doc.get(key)
+                    if val is not None:
+                        document[k] = val
+
+                _set_if_present("chunk_count")
+                _set_if_present("page_count")
+                _set_if_present("document_type")
+                _set_if_present("last_modified", "indexed_last_modified")
+
+                document["is_indexed"] = True
+            else:
+                # Keep output explicit and stable
+                document.setdefault("chunk_count", None)
+                document.setdefault("page_count", None)
+                document.setdefault("document_type", None)
+                document.setdefault("indexed_last_modified", None)
+                document["is_indexed"] = False
 
             indexing: Optional[Dict[str, Any]] = None
 
             self.logger.info("get_document: container='%s' doc_id='%s' (done)", container, doc_id)
-            return {"document": match, "indexing": indexing}
+            return {"document": document, "indexing": indexing}
 
         except Exception as e:
-            self.logger.error("get_document: container='%s' doc_id='%s' -> failed: %s", container, doc_id, e, exc_info=True)
+            self.logger.error(
+                "get_document: container='%s' doc_id='%s' -> failed: %s",
+                container,
+                doc_id,
+                e,
+                exc_info=True,
+            )
             raise
 
     def document_exists(self, container: str, doc_id: str) -> bool:
@@ -114,7 +219,7 @@ class IFUDocumentService:
             self.logger.error("upload_documents: container='%s' blob_prefix='%s' -> failed: %s", container, blob_prefix, e, exc_info=True)
 
     def ingest_documents(self, *, container: str, doc_ids: list[str], document_type: str = "IFU", ) -> int:
-        self.logger.info("ingest_documents: container='%s' document_type='%s' doc_ids=%d (start)", container, doc_ids, document_type,)
+        self.logger.info("ingest_documents: container='%s' document_type='%s' doc_ids=%d (start)", container, doc_ids, len(doc_ids),)
 
         if not doc_ids:
             self.logger.warning("ingest_documents: container='%s' document_type='%s' requested=%d ingested=%d (done)", container, doc_ids)

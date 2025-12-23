@@ -157,8 +157,8 @@ def test_upload_then_ingest_pipeline_via_services():
     cfg = _build_cfg_or_skip()
     sample_pdfs = _get_sample_pdf_files(cfg)
 
-    container = "ifu-docs-integration-test"
-    collection_name = "ifu-docs-integration-test"
+    container = "ifu-docs-test"
+    collection_name = "ifu-docs-test"
 
     # --- Thin blob loader ---
     doc_loader = IFUDocumentLoader(cfg=cfg)

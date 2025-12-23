@@ -7,7 +7,7 @@ import logging
 import time
 from pathlib import Path
 from typing import List
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.credentials import AzureNamedKeyCredential
 from azure.core.exceptions import ResourceNotFoundError, AzureError, ResourceExistsError
 
@@ -184,7 +184,18 @@ class IFUFileLoader:
             blob_client = container_client.get_blob_client(blob_name)
 
             with path_obj.open("rb") as f:
-                blob_client.upload_blob(f, overwrite=True)
+                metadata = {
+                    "document_type": "IFU",
+                    "source": "ingest",
+                    "owner": "Blatchford QARA",
+                }
+
+                blob_client.upload_blob(
+                    f,
+                    overwrite=True,
+                    metadata=metadata,
+                    content_settings=ContentSettings(content_type="application/pdf"),
+                )
 
             elapsed = (time.time() - start_time) * 1000.0
             self.logger.info(

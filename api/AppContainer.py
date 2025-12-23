@@ -9,6 +9,7 @@ from config.Config import Config
 from chunking.LangDetectDetector import LangDetectDetector
 from embedding.IFUEmbedder import IFUEmbedder
 from extractor.IFUTextExtractor import IFUTextExtractor
+from services.IFUDocumentService import IFUDocumentService
 from services.IFUHealthService import IFUHealthService
 from services.IFUIngestService import IFUIngestService
 from services.IFUQueryService import IFUQueryService
@@ -67,6 +68,13 @@ class AppContainer:
         self.query_service = IFUQueryService(
             store=self.store,
             collection_name="ifu-docs-test",
+        )
+
+        # Return a singleton IFUDocumentService instance
+        self.document_service = IFUDocumentService(
+            document_loader=self.document_loader,
+            ingest_service=self.ingest_service,
+            store=self.store,
         )
 
 # Singleton container instance
