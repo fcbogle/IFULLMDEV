@@ -3,6 +3,7 @@
 # Created: 2025-11-16
 # Description: ChromaIFUVectorStore
 # -----------------------------------------------------------------------------
+import time
 from dataclasses import dataclass
 from typing import Sequence, Dict, Any, List, Counter
 
@@ -187,77 +188,70 @@ class ChromaIFUVectorStore(IFUVectorStore):
             )
             raise
 
+    @staticmethod
+    def _flatten_ids(ids: Any) -> List[str]:
+        if ids is None:
+            return []
+
+        # already flat: ["a","b"]
+        if isinstance(ids, list) and (not ids or isinstance(ids[0], str)):
+            return [x for x in ids if isinstance(x, str)]
+
+        # nested: [["a","b"], ["c"]]
+        if isinstance(ids, list):
+            out: List[str] = []
+            for item in ids:
+                if isinstance(item, list):
+                    out.extend([x for x in item if isinstance(x, str)])
+                elif isinstance(item, str):
+                    out.append(item)
+            return out
+
+        return []
+
     def delete_by_doc_id(self, doc_id: str) -> int:
-        """
-        Delete all chunks in this collection that belong to the given doc_id.
-        Returns the number of chunks actually deleted.
-        """
-        self.logger.info(
-            "Deleting all chunks for doc_id '%s' from collection '%s'",
-            doc_id,
-            self.collection_name,
+        self.logger.info("delete_by_doc_id: doc_id='%s' (start)", doc_id)
+
+        # get ids for doc_id
+        res: Dict[str, Any] = self.collection.get(
+            where={"doc_id": {"$eq": doc_id}},
+            include=[],
         )
 
-        # 1) Fetch all IDs for this doc_id (no embeddings, no NumResults quota)
-        try:
-            res: Dict[str, Any] = self.collection.get(
-                where={"doc_id": {"$eq": doc_id}},
-                include=[],  # we only care about ids
-            )
-        except Exception as e:
-            self.logger.error(
-                "Failed to get chunks for doc_id '%s' from collection '%s': %s",
-                doc_id,
-                self.collection_name,
-                e,
-            )
-            raise
-
-        ids: List[str] = res.get("ids", []) or []
+        ids = self._flatten_ids(res.get("ids"))
         if not ids:
-            self.logger.info(
-                "No chunks found for doc_id '%s' in collection '%s'",
-                doc_id,
-                self.collection_name,
-            )
+            self.logger.info("delete_by_doc_id: doc_id='%s' -> 0 (nothing to delete)", doc_id)
             return 0
 
-        # 2) Ensure IDs are unique (Chroma requires this)
-        # preserves order while de-duplicating
         unique_ids = list(dict.fromkeys(ids))
-        if len(unique_ids) != len(ids):
-            self.logger.info(
-                "Found %d duplicate IDs for doc_id '%s'; deduping to %d IDs",
-                len(ids) - len(unique_ids),
-                doc_id,
-                len(unique_ids),
-            )
-
-        # 3) Delete those specific IDs
-        try:
-            self.collection.delete(ids=unique_ids)
-        except Exception as e:
-            self.logger.error(
-                "Failed to delete %d chunks for doc_id '%s' from collection '%s': %s",
-                len(unique_ids),
-                doc_id,
-                self.collection_name,
-                e,
-            )
-            raise
-
-        deleted_count = len(unique_ids)
         self.logger.info(
-            "Deleted %d chunks for doc_id '%s' from collection '%s'",
-            deleted_count,
-            doc_id,
-            self.collection_name,
+            "delete_by_doc_id: doc_id='%s' found=%d unique=%d (deleting)",
+            doc_id, len(ids), len(unique_ids)
         )
-        return deleted_count
 
-    from collections import Counter
-    from typing import Any, Dict, List
+        # delete ids
+        self.collection.delete(ids=unique_ids)
 
+        # poll until gone (handles eventual consistency)
+        max_wait_s = 3.0
+        deadline = time.time() + max_wait_s
+        while time.time() < deadline:
+            check = self.collection.get(where={"doc_id": {"$eq": doc_id}}, include=[])
+            remaining = self._flatten_ids(check.get("ids"))
+            if not remaining:
+                self.logger.info(
+                    "delete_by_doc_id: doc_id='%s' deleted=%d (confirmed gone)",
+                    doc_id, len(unique_ids)
+                )
+                return len(unique_ids)
+            time.sleep(0.2)
+
+        # if still visible, log it (but still return deleted count)
+        self.logger.warning(
+            "delete_by_doc_id: doc_id='%s' delete issued, but %d ids still visible after %.1fs (eventual consistency?)",
+            doc_id, len(remaining), max_wait_s
+        )
+        return len(unique_ids)
     def list_documents(self, *, limit: int = 1000) -> List[Dict[str, Any]]:
         """
         Return a list of documents present in this collection,
