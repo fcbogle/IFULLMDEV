@@ -1,169 +1,184 @@
 # -----------------------------------------------------------------------------
 # Author: Frank Campbell Bogle
-# Created: 2025-12-27
-# Description: IFUChatService.py
+# Created: 2025-12-28
+# Description: services/IFUChatService.py
 # -----------------------------------------------------------------------------
+from __future__ import annotations
+
 import logging
-from typing import Any, Optional, Dict, List, Sequence
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-from OpenAIChat import OpenAIChat, Message
-from services.IFUQueryService import IFUQueryService
 from utility.logging_utils import get_class_logger
+from services.IFUQueryService import IFUQueryService
+from chat.OpenAIChat import OpenAIChat, Message
 
 
-def _safe_str(x: Any) -> str:
-    return "" if x is None else str(x)
-
-
+@dataclass
 class IFUChatService:
     """
-    Chat Service:
-        - retrieves relevant chunks using IFUQueryService
-        - builds an instruction + context prompt
-        - calls OpenAIChat to generate answer
-        - returns answer + sources
+    RAG chat service:
+      - retrieve context via IFUQueryService
+      - construct a grounded prompt
+      - call OpenAIChat
+      - return answer + sources
     """
+
     query_service: IFUQueryService
     chat_client: OpenAIChat
-    logger: logging.Logger | None = None
+    logger: Any = None
 
-    system_prompt: str = (
-        "You are an assistant helping with medical device IFU documents.\n"
-        "Use ONLY the provided context to answer.\n"
-        "If the context is insufficient, say so and ask a precise follow-up.\n"
-        "Cite sources as [doc_id pX] where possible.\n"
-    )
-
-    max_context_chars: int = 18_000  # guardrail (fits most models comfortably)
-    default_temperature: float = 0.0
-    default_max_tokens: int = 700
+    # prompt knobs
+    max_context_chars: int = 12000  # keeps prompts sane without tokenizers
+    include_scores_in_prompt: bool = True
 
     def __post_init__(self) -> None:
         self.logger = self.logger or get_class_logger(self.__class__)
         self.logger.info(
-            "IFUChatService initialised (query_service=%s chat_client=%s)",
+            "IFUChatService initialised (query_service=%s, chat_client=%s)",
             type(self.query_service).__name__,
             type(self.chat_client).__name__,
         )
 
-    def chat(self,
-             *,
-             user_query: str,
-             n_results: int = 5,
-             where: Optional[Dict[str: Any]] = None,
-             conversation: Optional[List[Message]] = None,
-             temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None,
-             ) -> Dict[str, Any]:
-        """
-            Returns:
-            {
-                "answer": str,
-                "sources": [ {doc_id, page, chunk_id, score, text, metadata}, ... ],
-                "retrieval": {"n_results":..., "where":...},
-                "model": str|None,
-                "usage": Any|None,
-            }
-        """
-        q = (user_query or "").strip()
+    def ask(
+        self,
+        *,
+        question: str,
+        n_results: int = 5,
+        where: Optional[Dict[str, Any]] = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        q = (question or "").strip()
         if not q:
-            raise ValueError("user_query must not be empty")
-
-        conversation = conversation or []
+            raise ValueError("question must not be empty")
 
         self.logger.info(
-            "chat: query='%s' n_results=%d where=%s conv_turns=%d (start)",
-            q[:120],
+            "ask: question_len=%d n_results=%d where=%s temp=%.2f max_tokens=%d (start)",
+            len(q),
             n_results,
-            where,
-            len(conversation),
+            "yes" if where else "no",
+            temperature,
+            max_tokens,
         )
 
-        # Retrieve raw results from IFUQueryService
-        raw = self.query_service.query(query_text=q, n_results=n_results, where=where)
-        hits = self.query_service.to_hits(raw, include_text=True, include_scores=True, include_metadata=True)
-
-        self.logger.info("chat: retrieved hits=%d", len(hits))
-
-        # Build context block
-        context = self._build_context_block(hits)
-        self.logger.debug("chat: context_chars=%d", len(context))
-
-        # Build messages
-        messages: List[Message] = [{"role": "system", "content": self.system_prompt}]
-        # Optional: include prior turns (if you want multi-turn chat in UI)
-        # Keep them BEFORE the new user question, and DO NOT include retrieved context as assistant text.
-        if conversation:
-            messages.extend(conversation)
-
-        user_payload = (
-            f"USER QUESTION:\n{q}\n\n"
-            f"CONTEXT (retrieved passages):\n{context}\n\n"
-            f"INSTRUCTIONS:\n"
-            f"- Answer the user question.\n"
-            f"- If you use a passage, cite it like [doc_id pX].\n"
-            f"- If you cannot answer from context, say so.\n"
-        )
-        messages.append({"role": "user", "content": user_payload})
-
-        # Call OpenAIChat LLM to generate answer
-        temp = self.default_temperature if temperature is None else temperature
-        mtok = self.default_max_tokens if max_tokens is None else max_tokens
-
-        resp = self.chat_client.chat(messages, temperature=temp, max_tokens=mtok)
-
+        # 1) Retrieve
         try:
-            answer = resp.choices[0].message.content or ""
+            raw = self.query_service.query(query_text=q, n_results=n_results, where=where)
+            hits = self.query_service.to_hits(
+                raw,
+                include_text=True,
+                include_scores=True,
+                include_metadata=True,
+            )
+            self.logger.info("ask: retrieved_hits=%d (done)", len(hits))
         except Exception as e:
-            self.logger.error("chat: unexpected OpenAI response: %s", e, exc_info=True)
-            raise RuntimeError(f"Unexpected OpenAI response format: {e}")
+            self.logger.error("ask: retrieval failed: %s", e, exc_info=True)
+            raise
 
-        self.logger.info("chat: answer_chars=%d (done)", len(answer))
+        # 2) Build context text
+        context_text = self._build_context(hits)
+
+        # 3) Compose messages
+        messages = self._build_messages(
+            question=q,
+            context=context_text,
+            history=history,
+        )
+
+        # 4) Call OpenAI
+        try:
+            resp = self.chat_client.chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+            usage = getattr(resp, "usage", None)
+            model = getattr(resp, "model", None)
+
+            self.logger.info("ask: answer_len=%d model=%s usage=%r (done)", len(answer), model, usage)
+        except Exception as e:
+            self.logger.error("ask: LLM call failed: %s", e, exc_info=True)
+            raise
 
         return {
+            "question": q,
             "answer": answer,
-            "sources": hits,  # already dicts from to_hits()
-            "retrieval": {"n_results": n_results, "where": where},
-            "model": getattr(resp, "model", None),
-            "usage": getattr(resp, "usage", None),
+            "sources": hits,  # return raw hits; router can map to schema
+            "model": model,
+            "usage": usage.model_dump() if hasattr(usage, "model_dump") else (usage if isinstance(usage, dict) else None),
         }
 
-    def _build_context_block(self, hits: Sequence[Dict[str, Any]]) -> str:
+    def _build_context(self, hits: List[Dict[str, Any]]) -> str:
         """
-        Turn hits into a prompt-friendly context block.
+        Build a compact context pack. Keep it deterministic and easy to cite:
+        [1] doc_id=... page=... chunk_id=... score=...
+            <text>
         """
         parts: List[str] = []
-        total = 0
+        used = 0
 
-        for i, h in enumerate(hits, start=1):
-            doc_id = _safe_str(h.get("doc_id") or h.get("metadata", {}).get("doc_id"))
-            page = h.get("page") or h.get("metadata", {}).get("page_start")
-            text = _safe_str(h.get("text"))
+        for idx, h in enumerate(hits, start=1):
+            doc_id = h.get("doc_id")
+            page = h.get("page")
+            chunk_id = h.get("chunk_id")
             score = h.get("score")
+            text = (h.get("text") or "").strip()
 
-            # Keep it compact but traceable
-            header = f"[{i}] {doc_id}"
-            if page is not None:
-                header += f" p{page}"
-            if score is not None:
-                header += f" score={score:.4f}" if isinstance(score, (int, float)) else f" score={score}"
+            header = f"[{idx}] doc_id={doc_id} page={page} chunk_id={chunk_id}"
+            if self.include_scores_in_prompt:
+                header += f" score={score}"
 
-            chunk = f"{header}\n{text}".strip() + "\n"
+            block = header + "\n" + text
+            if not text:
+                continue
 
-            if total + len(chunk) > self.max_context_chars:
-                self.logger.warning(
-                    "_build_context_block: truncating context at %d chars (limit=%d)",
-                    total,
-                    self.max_context_chars,
-                )
+            # crude char limit (works well enough without token counting)
+            if used + len(block) > self.max_context_chars:
+                self.logger.info("build_context: hit_limit reached at %d hits (chars=%d)", idx - 1, used)
                 break
 
-            parts.append(chunk)
-            total += len(chunk)
+            parts.append(block)
+            used += len(block) + 2
 
-        if not parts:
-            return "(no retrieved context)"
+        context = "\n\n".join(parts).strip()
+        self.logger.info("build_context: context_chars=%d hits_used=%d", len(context), len(parts))
+        return context
 
-        return "\n---\n".join(parts)
+    def _build_messages(
+        self,
+        *,
+        question: str,
+        context: str,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> List[Message]:
+        system = (
+            "You are an assistant helping with medical device IFU content. "
+            "Answer ONLY using the provided context. "
+            "If the context does not contain the answer, say you don't have enough information and ask what to check. "
+            "When you use facts from context, cite them using [#] indices."
+        )
+
+        messages: List[Message] = [{"role": "system", "content": system}]
+
+        # Optional chat history (v2)
+        if history:
+            for m in history:
+                role = (m.get("role") or "").strip()
+                content = (m.get("content") or "").strip()
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
+
+        user = (
+            f"Question:\n{question}\n\n"
+            f"Context:\n{context if context else '[no context retrieved]'}\n\n"
+            "Answer:"
+        )
+        messages.append({"role": "user", "content": user})
+
+        self.logger.debug("build_messages: messages=%d context_present=%s", len(messages), bool(context))
+        return messages
 
 

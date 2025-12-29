@@ -3,12 +3,13 @@
 # Created: 2025-12-20
 # Description: AppContainer.py
 # -----------------------------------------------------------------------------
-
+from chat.OpenAIChat import OpenAIChat
 from config.Config import Config
 
 from chunking.LangDetectDetector import LangDetectDetector
 from embedding.IFUEmbedder import IFUEmbedder
 from extractor.IFUTextExtractor import IFUTextExtractor
+from services.IFUChatService import IFUChatService
 from services.IFUDocumentService import IFUDocumentService
 from services.IFUHealthService import IFUHealthService
 from services.IFUIngestService import IFUIngestService
@@ -70,11 +71,19 @@ class AppContainer:
             collection_name="ifu-docs-test",
         )
 
+        self.openai_chat = OpenAIChat(cfg=self.cfg)
+
         # Return a singleton IFUDocumentService instance
         self.document_service = IFUDocumentService(
             document_loader=self.document_loader,
             ingest_service=self.ingest_service,
             store=self.store,
+        )
+
+        # Return a singelton IFUChatService instance
+        self.chat_service = IFUChatService(
+            query_service=self.query_service,
+            chat_client=self.openai_chat,
         )
 
 # Singleton container instance

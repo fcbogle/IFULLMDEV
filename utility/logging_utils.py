@@ -6,7 +6,14 @@
 
 # logging_utils.py
 import logging
+import os
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
 import colorlog
+
+def _ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _create_logger(full_name: str) -> logging.Logger:
@@ -16,6 +23,7 @@ def _create_logger(full_name: str) -> logging.Logger:
     logger = logging.getLogger(full_name)
 
     if not logger.handlers:
+        # Standard console logger
         handler = logging.StreamHandler()
 
         formatter = colorlog.ColoredFormatter(
@@ -44,7 +52,36 @@ def _create_logger(full_name: str) -> logging.Logger:
 
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
+
+        # File logger for UI
+        log_to_file = os.getenv("IFU_LOG_TO_FILE", "1").lower() in ("1", "true", "yes", "y")
+        log_file = os.getenv("IFU_LOG_FILE", "./logs/ifullmdev.log")
+
+        if log_to_file:
+            log_path = Path(log_file)
+            _ensure_parent_dir(log_path)
+
+            # Rotating file prevents infinite growth
+            max_bytes = int(os.getenv("IFU_LOG_MAX_BYTES", str(5 * 1024 * 1024)))  # 5MB
+            backup_count = int(os.getenv("IFU_LOG_BACKUP_COUNT", "5"))
+
+            file_handler = RotatingFileHandler(
+                filename=str(log_path),
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+
+            file_formatter = logging.Formatter(
+                fmt="%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+            file_handler.setFormatter(file_formatter)
+            logger.addHandler(file_handler)
+
+            # Level + propagation
+        level_name = os.getenv("IFU_LOG_LEVEL", "INFO").upper()
+        logger.setLevel(getattr(logging, level_name, logging.INFO))
         logger.propagate = False
 
     return logger

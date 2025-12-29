@@ -7,6 +7,7 @@ from functools import lru_cache
 
 from api.AppContainer import app_container
 from config.Config import Config
+from services.IFUChatService import IFUChatService
 from services.IFUDocumentService import IFUDocumentService
 from services.IFUHealthService import IFUHealthService
 from services.IFUQueryService import IFUQueryService
@@ -35,3 +36,6 @@ def get_query_service() -> IFUQueryService:
 
 def get_document_service() -> IFUDocumentService:
     return app_container.document_service
+
+def get_chat_service() -> IFUChatService:
+    return app_container.chat_service
