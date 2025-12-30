@@ -9,6 +9,7 @@ from config.Config import Config
 from chunking.LangDetectDetector import LangDetectDetector
 from embedding.IFUEmbedder import IFUEmbedder
 from extractor.IFUTextExtractor import IFUTextExtractor
+from services.IFUBlobService import IFUBlobService
 from services.IFUChatService import IFUChatService
 from services.IFUDocumentService import IFUDocumentService
 from services.IFUHealthService import IFUHealthService
@@ -84,6 +85,11 @@ class AppContainer:
         self.chat_service = IFUChatService(
             query_service=self.query_service,
             chat_client=self.openai_chat,
+        )
+
+        # Return a singleton IFUBlobService instance
+        self.blob_service = IFUBlobService(
+            file_loader=self.document_loader.file_loader
         )
 
 # Singleton container instance

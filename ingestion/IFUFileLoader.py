@@ -6,7 +6,7 @@
 import logging
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Dict
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.core.credentials import AzureNamedKeyCredential
 from azure.core.exceptions import ResourceNotFoundError, AzureError, ResourceExistsError
@@ -228,3 +228,36 @@ class IFUFileLoader:
                 e,
             )
             raise
+    def upload_document_bytes(
+            self,
+            *,
+            data: bytes,
+            container: str,
+            blob_name: str,
+            content_type: str = "application/pdf",
+            metadata: Optional[Dict[str, str]] = None,
+    ) -> str:
+        if data is None:
+            raise ValueError("data must not be None")
+
+        container_client = self.blob_service.get_container_client(container)
+        try:
+            container_client.create_container()
+            self.logger.info("Created container '%s' for upload.", container)
+        except ResourceExistsError:
+            pass
+
+        blob_client = container_client.get_blob_client(blob_name)
+
+        # IMPORTANT: metadata values must be str
+        md = {str(k): str(v) for k, v in (metadata or {}).items()}
+
+        blob_client.upload_blob(
+            data,
+            overwrite=True,
+            metadata=md,
+            content_settings=ContentSettings(content_type=content_type),
+        )
+
+        self.logger.info("Uploaded bytes -> '%s/%s' (%d bytes)", container, blob_name, len(data))
+        return blob_name

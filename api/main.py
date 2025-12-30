@@ -6,7 +6,7 @@
 import os
 
 from fastapi import FastAPI
-from api.routers import health, ifu_stats, query, documents, chat
+from api.routers import health, ifu_stats, query, documents, chat, blobs
 import gradio as gr
 import logging
 
@@ -19,7 +19,7 @@ app.include_router(ifu_stats.router)
 app.include_router(query.router)
 app.include_router(documents.router)
 app.include_router(chat.router)
-# app.include_router(ifu_query.router)
+app.include_router(blobs.router)
 
 # Mount Gradio (served by the SAME uvicorn process/port)
 API_BASE_URL = os.getenv("IFU_API_BASE_URL", "http://127.0.0.1:8000")

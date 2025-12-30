@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import gradio as gr
@@ -43,10 +44,11 @@ def _get(path: str, params: Optional[dict] = None) -> Dict[str, Any]:
 def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         r = requests.post(_url(path), json=payload, timeout=TIMEOUT_SECONDS)
-        r.raise_for_status()
+        if not r.ok:
+            return {"error": f"HTTP {r.status_code}: {r.text}"}
         return r.json()
     except requests.exceptions.RequestException as e:
-        return {"error": f"API request failed: {e}"}
+        return {"error": f"RequestException: {e}"}
 
 
 def _delete(path: str) -> Dict[str, Any]:
@@ -75,6 +77,114 @@ def tail_log_file(path: str, n_lines: int = 200) -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"[log] failed to read log file: {e}"
+
+# Blob UI functions
+
+def ui_list_blobs(container: str) -> pd.DataFrame:
+    container = (container or "").strip() or DEFAULT_CONTAINER
+    out = _get("/blobs", params={"container": container})
+    blobs = out.get("blobs") or out.get("items") or []
+    return pd.DataFrame(blobs)
+
+def ui_upload_blobs(container: str, blob_prefix: str, files) -> str:
+    """
+    Upload one or more local PDF files to /blobs/upload using multipart/form-data.
+    """
+    container = (container or "").strip() or DEFAULT_CONTAINER
+    blob_prefix = (blob_prefix or "").strip()
+
+    if not files:
+        return json.dumps({"error": "No files selected"}, indent=2)
+
+    if not isinstance(files, list):
+        files = [files]
+
+    multipart = []
+    for f in files:
+        p = getattr(f, "name", None)
+        if not p:
+            continue
+        multipart.append(
+            ("files", (Path(p).name, open(p, "rb"), "application/pdf"))
+        )
+
+    if not multipart:
+        return json.dumps({"error": "No valid files found"}, indent=2)
+
+    try:
+        r = requests.post(
+            _url("/blobs/upload"),
+            params={"container": container, "blob_prefix": blob_prefix},
+            files=multipart,
+            timeout=TIMEOUT_SECONDS,
+        )
+
+        # 🔑 THIS IS THE IMPORTANT PART
+        if r.status_code != 200:
+            return json.dumps(
+                {
+                    "error": "upload failed",
+                    "status_code": r.status_code,
+                    "response": r.text,   # ← FastAPI validation detail lives here
+                },
+                indent=2,
+            )
+
+        return json.dumps(r.json(), indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": f"upload failed: {e}"}, indent=2)
+
+    finally:
+        for _, (_, fh, _) in multipart:
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+def ui_delete_blob(container: str, blob_name: str) -> str:
+    container = (container or "").strip() or DEFAULT_CONTAINER
+    blob_name = (blob_name or "").strip()
+    if not blob_name:
+        return json.dumps({"error": "blob_name required"}, indent=2)
+
+    try:
+        r = requests.delete(
+            _url(f"/blobs/{blob_name}"),
+            params={"container": container},
+            timeout=TIMEOUT_SECONDS,
+        )
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+    except Exception as e:
+        return json.dumps({"error": f"delete failed: {e}"}, indent=2)
+
+def ui_set_blob_metadata(container: str, blob_name: str, metadata_json: str) -> str:
+    container = (container or "").strip() or DEFAULT_CONTAINER
+    blob_name = (blob_name or "").strip()
+    metadata_json = (metadata_json or "").strip()
+
+    if not blob_name:
+        return json.dumps({"error": "blob_name required"}, indent=2)
+
+    meta = {}
+    if metadata_json:
+        try:
+            meta = json.loads(metadata_json)
+        except Exception as e:
+            return json.dumps({"error": f"invalid metadata JSON: {e}"}, indent=2)
+
+    try:
+        r = requests.patch(
+            _url(f"/blobs/{blob_name}/metadata"),
+            params={"container": container},
+            json={"metadata": meta},
+            timeout=TIMEOUT_SECONDS,
+        )
+        r.raise_for_status()
+        return json.dumps(r.json(), indent=2)
+    except Exception as e:
+        return json.dumps({"error": f"metadata update failed: {e}"}, indent=2)
 
 
 # Document UI functions
@@ -188,35 +298,46 @@ def ui_query(container: str, query_text: str, n_results: int, lang_en_only: bool
 
 # Chat UI functions
 def ui_chat(
-        container: str,
-        question: str,
-        n_results: int,
-        lang_en_only: bool,
-        where_json: str,
-        temperature: float,
-        max_tokens: int,
-        history: List[List[str]],  # Gradio Chatbot format: [[user, assistant], ...]
-) -> Tuple[List[List[str]], str, pd.DataFrame]:
+    container: str,
+    question: str,
+    n_results: int,
+    lang_en_only: bool,
+    where_json: str,
+    temperature: float,
+    max_tokens: int,
+    history,  # depends on gr.Chatbot type; see note below
+):
     question = (question or "").strip()
     if not question:
         return history, "", pd.DataFrame()
 
+    # Build where
     where: Optional[Dict[str, Any]] = None
     where_json = (where_json or "").strip()
     if where_json:
         try:
             where = json.loads(where_json)
         except Exception as e:
-            # show error as assistant response
-            history = history + [[question, f"Invalid where JSON: {e}"]]
+            # return error as assistant message
+            history = history + [{"role": "assistant", "content": f"Invalid where JSON: {e}"}]
             return history, "", pd.DataFrame()
 
     if lang_en_only:
         lang_filter = {"lang": {"$eq": "en"}}
         where = lang_filter if where is None else {**lang_filter, **where}
 
-    # Convert history to OpenAI-style history for your API (optional)
-    # Your ChatRequest.history is Optional[List[Dict[str,str]]]
+    # Convert Gradio chat history -> API "conversation"
+    # If your chatbot is type="messages", history is a list[dict] already.
+    conversation: List[Dict[str, str]] = []
+    if history:
+        for m in history:
+            # m should be {"role": "...", "content": "..."}
+            if isinstance(m, dict) and "role" in m and "content" in m:
+                conversation.append({"role": m["role"], "content": m["content"]})
+
+    # Add the user's new question into conversation
+    conversation.append({"role": "user", "content": question})
+
     api_history: List[Dict[str, str]] = []
     for u, a in history:
         if u:
@@ -225,32 +346,29 @@ def ui_chat(
             api_history.append({"role": "assistant", "content": a})
 
     payload = {
-        "question": question,
+        "question": question,  # ✅ required key
         "n_results": int(n_results),
         "where": where,
         "temperature": float(temperature),
         "max_tokens": int(max_tokens),
-        "history": api_history or None,
+        "history": api_history or None,  # ✅ correct name (not conversation)
     }
 
     out = _post("/chat", payload=payload)
     answer = out.get("answer") or ""
 
-    # Add to chat UI history
-    history = history + [[question, answer]]
+    # Update Gradio history (messages format)
+    history = (history or []) + [
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": answer},
+    ]
 
-    # Sources table
-    sources = out.get("sources") or []
-    sources_df = pd.DataFrame(sources)
-
-    # Optional debug panel text
+    sources_df = pd.DataFrame(out.get("sources") or [])
     debug = json.dumps(
-        {"model": out.get("model"), "usage": out.get("usage"), "n_sources": len(sources)},
+        {"model": out.get("model"), "usage": out.get("usage"), "n_sources": len(out.get("sources") or [])},
         indent=2,
     )
-
     return history, debug, sources_df
-
 
 # Build Gradio UI
 def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
@@ -259,13 +377,39 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
 
     with gr.Blocks(title="IFULLMDEV UI", analytics_enabled=False) as demo:
         gr.Markdown(
-            f"""
-# IFULLMDEV (RAG + Chat)
-**API:** `{API_BASE_URL}`  
-**Default container:** `{DEFAULT_CONTAINER}`  
-**Log file:** `{LOG_FILE}`
-"""
-        )
+            f""" # IFULLMDEV (RAG + Chat) **API:** `{API_BASE_URL}`  **Default container:** `{DEFAULT_CONTAINER}`  **Log file:** `{LOG_FILE}`""" )
+
+        with gr.Tab("Blobs"):
+            with gr.Row():
+                b_container = gr.Textbox(label="Blob container", value=DEFAULT_CONTAINER)
+                b_refresh = gr.Button("Refresh blobs")
+            blobs_df = gr.Dataframe(label="Blobs (/blobs)", interactive=False)
+            b_refresh.click(fn=ui_list_blobs, inputs=[b_container], outputs=[blobs_df])
+
+            gr.Markdown("### Upload PDFs to Blob Storage")
+            with gr.Row():
+                b_prefix = gr.Textbox(label="blob_prefix", value="")
+                b_files = gr.File(label="Select PDF files", file_count="multiple", file_types=[".pdf"])
+            b_upload = gr.Button("Upload")
+            b_upload_out = gr.Code(label="Upload response", language="json")
+            b_upload.click(fn=ui_upload_blobs, inputs=[b_container, b_prefix, b_files], outputs=[b_upload_out])
+
+            gr.Markdown("### Blob actions")
+            with gr.Row():
+                blob_name = gr.Textbox(label="blob_name", placeholder="BMK2IFU.pdf")
+                b_delete = gr.Button("Delete blob")
+            b_action_out = gr.Code(label="Blob action output", language="json")
+            b_delete.click(fn=ui_delete_blob, inputs=[b_container, blob_name], outputs=[b_action_out])
+
+            gr.Markdown("### Metadata")
+            b_meta_json = gr.Textbox(
+                label="metadata JSON",
+                value='{"document_type":"IFU","source":"ui","owner":"Blatchford QARA"}',
+                lines=4,
+            )
+            b_set_meta = gr.Button("Set metadata")
+            b_set_meta.click(fn=ui_set_blob_metadata, inputs=[b_container, blob_name, b_meta_json],
+                             outputs=[b_action_out])
 
         with gr.Tab("Documents"):
             with gr.Row():
