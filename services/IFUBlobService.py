@@ -16,6 +16,8 @@ from fastapi import UploadFile
 from utility.logging_utils import get_class_logger
 from ingestion.IFUFileLoader import IFUFileLoader
 
+REQUIRED_BLOB_META_KEYS = ["document_type"]
+
 
 def _norm_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, str]:
     """
@@ -180,42 +182,6 @@ class IFUBlobService:
             self.logger.exception("delete_blob failed: container='%s' blob='%s': %s", container, blob_name, e)
             raise
 
-    def upload_bytes(
-        self,
-        *,
-        container: str,
-        blob_name: str,
-        data: bytes,
-        content_type: str = "application/pdf",
-        metadata: Optional[Dict[str, Any]] = None,
-        overwrite: bool = True,
-    ) -> str:
-        norm = _norm_meta(metadata)
-        self.logger.info(
-            "upload_bytes: container='%s' blob='%s' bytes=%d overwrite=%s (start)",
-            container, blob_name, len(data), overwrite
-        )
-        try:
-            cc = self.file_loader.blob_service.get_container_client(container)
-            try:
-                cc.create_container()
-                self.logger.info("upload_bytes: created container '%s'", container)
-            except Exception:
-                pass
-
-            bc = cc.get_blob_client(blob_name)
-            bc.upload_blob(
-                data,
-                overwrite=overwrite,
-                metadata=norm,
-                content_settings=ContentSettings(content_type=content_type),
-            )
-            self.logger.info("upload_bytes: container='%s' blob='%s' (done)", container, blob_name)
-            return blob_name
-        except AzureError as e:
-            self.logger.exception("upload_bytes failed: container='%s' blob='%s': %s", container, blob_name, e)
-            raise
-
     async def upload_files(
             self,
             *,
@@ -283,3 +249,4 @@ class IFUBlobService:
                "results": results}
         self.logger.info("upload_files: container='%s' uploaded=%d errors=%d (done)", container, uploaded, errors)
         return out
+

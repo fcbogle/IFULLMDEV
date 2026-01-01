@@ -4,7 +4,7 @@
 # Description: api/routers/blobs.py
 # -----------------------------------------------------------------------------
 import logging
-from typing import List
+from typing import List, Dict, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response
@@ -24,11 +24,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/blobs", tags=["blobs"])
 
 @router.get("", response_model=ListBlobsResponse)
-def get_blobs(
-    container: str,
-    prefix: str = "",
-    svc: IFUBlobService = Depends(get_blob_service),
-) -> ListBlobsResponse:
+def get_blobs(container: str, prefix: str = "", svc: IFUBlobService = Depends(get_blob_service)) -> ListBlobsResponse:
     container = (container or "").strip()
     prefix = (prefix or "").strip()
     if not container:
@@ -37,15 +33,20 @@ def get_blobs(
     logger.info("GET /blobs (start) container='%s' prefix='%s'", container, prefix)
 
     try:
-        raw = svc.list_blobs(container=container, prefix=prefix)
-        # raw is List[dict]
-        blobs = [BlobInfo(**{**b, "container": container}) for b in raw]
+        raw = svc.get_blob_details(container=container, prefix=prefix)
+
+        blobs: List[BlobInfo] = []
+        for b in raw:
+            enriched = {**b, "container": container, **_blob_status(b)}
+            blobs.append(BlobInfo(**enriched))
+
         logger.info("GET /blobs (done) container='%s' count=%d", container, len(blobs))
-        return ListBlobsResponse(container=container, count=len(blobs), blobs=blobs)
+        return ListBlobsResponse(container=container, prefix=prefix, count=len(blobs), blobs=blobs)
 
     except Exception as e:
         logger.exception("GET /blobs failed: %s", e)
         raise HTTPException(status_code=500, detail=f"get_blobs failed: {e}")
+
 
 
 @router.get("/{blob_name}", response_model=GetBlobResponse)
@@ -180,3 +181,50 @@ def delete_blob(
     except Exception as e:
         logger.exception("DELETE /blobs/{blob} failed: %s", e)
         raise HTTPException(status_code=500, detail=f"delete blob failed: {e}")
+
+StatusCode = Literal["ready", "not_ingestible", "warning"]
+
+REQUIRED_META_KEYS = {"source", "filename"}  # blob-level requirements only
+def _blob_status(b: Dict[str, Any]) -> Dict[str, Any]:
+    name = (b.get("blob_name") or "").strip()
+    content_type = (b.get("content_type") or "").strip().lower()
+    meta = b.get("blob_metadata") or {}
+    issues: List[str] = []
+
+    # --- PDF check (strict) ---
+    is_pdf_ext = name.lower().endswith(".pdf")
+    is_pdf_ct = content_type in ("application/pdf", "application/x-pdf")
+    is_pdf = is_pdf_ext or is_pdf_ct
+
+    if not is_pdf:
+        issues.append("not_pdf")
+
+    # --- required blob metadata ---
+    missing = [
+        k for k in REQUIRED_META_KEYS
+        if not str(meta.get(k, "")).strip()
+    ]
+    if missing:
+        issues.append("missing_metadata:" + ",".join(missing))
+
+    # --- derive status_code ---
+    if "not_pdf" in issues:
+        status_code: StatusCode = "not_ingestible"
+    elif any(i.startswith("missing_metadata:") for i in issues):
+        status_code = "needs_metadata"
+    else:
+        status_code = "ready"
+
+    status_label = {
+        "ready": "🟢 READY",
+        "needs_metadata": "🟠 NEEDS METADATA",
+        "not_ingestible": "🔴 NOT INGESTIBLE",
+    }[status_code]
+
+    return {
+        "status_code": status_code,
+        "issues": issues,
+        "status": status_label,
+    }
+
+

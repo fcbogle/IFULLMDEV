@@ -225,6 +225,27 @@ def ui_set_blob_metadata(container: str, blob_name: str, metadata_json: str) -> 
     except Exception as e:
         return json.dumps({"error": f"metadata update failed: {e}"}, indent=2)
 
+def ui_list_blobs_with_status(container: str) -> pd.DataFrame:
+    container = (container or "").strip() or DEFAULT_CONTAINER
+    blobs_out = _get("/blobs", params={"container": container})
+    blobs = blobs_out.get("blobs") or []
+    if not blobs:
+        return pd.DataFrame([])
+
+    df = pd.DataFrame(blobs)
+
+    # Optional: drop noisy columns
+    for col in ("blob_metadata",):
+        if col in df.columns:
+            df = df.drop(columns=[col])
+
+    # Put status first
+    if "status" in df.columns:
+        cols = ["status"] + [c for c in df.columns if c != "status"]
+        df = df[cols]
+
+    return df
+
 
 # ---------------------------
 # Documents UI functions
@@ -237,22 +258,74 @@ def ui_get_stats(container: str) -> Tuple[str, pd.DataFrame, pd.DataFrame]:
     blobs_df = pd.DataFrame(stats.get("blobs") or [])
     return stats_json, docs_df, blobs_df
 
-
 def ui_list_documents(container: str) -> pd.DataFrame:
     container = (container or "").strip() or DEFAULT_CONTAINER
     out = _get("/documents", params={"container": container})
-    if out.get("error"):
-        return pd.DataFrame([out])
-    return pd.DataFrame(out.get("documents") or [])
+    docs = out.get("documents") or []
+    if not docs:
+        return pd.DataFrame([])
 
+    df = pd.DataFrame(docs)
+
+    # defaults
+    if "is_indexed" not in df.columns:
+        df["is_indexed"] = False
+    if "indexed_last_modified" not in df.columns:
+        df["indexed_last_modified"] = None
+    if "blob_last_modified" not in df.columns:
+        df["blob_last_modified"] = None
+
+    def _status_row(r) -> tuple[str, str]:
+        is_indexed = bool(r.get("is_indexed"))
+
+        blob_lm = r.get("blob_last_modified")
+        idx_lm = r.get("indexed_last_modified")
+
+        # treat “stale” only if indexed and both timestamps exist and differ
+        is_stale = is_indexed and blob_lm and idx_lm and (str(blob_lm) != str(idx_lm))
+
+        if not is_indexed:
+            return "🔴", "NOT INDEXED"
+        if is_stale:
+            return "🟠", "STALE"
+        return "🟢", "INDEXED"
+
+    df[["status", "status_detail"]] = df.apply(
+        lambda r: pd.Series(_status_row(r)),
+        axis=1
+    )
+
+    # drop noisy columns
+    for col in ("blob_metadata", "blob_name"):
+        if col in df.columns:
+            df = df.drop(columns=[col])
+
+    # optional: nicer ordering
+    preferred = [
+        "status", "status_detail",
+        "doc_id", "blob_name",
+        "document_type",
+        "page_count", "chunk_count",
+        "blob_last_modified", "indexed_last_modified",
+        "size", "content_type",
+        "container",
+    ]
+    cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    df = df[cols]
+
+    return df
 
 def ui_list_document_ids(container: str) -> List[str]:
     container = (container or "").strip() or DEFAULT_CONTAINER
     out = _get("/documents/ids", params={"container": container})
-    if out.get("error"):
-        return []
-    return out.get("doc_ids") or []
+    ids = out.get("doc_ids") or []
+    # defensive: ensure list[str]
+    return [x for x in ids if isinstance(x, str)]
 
+def ui_refresh_documents_and_ids(container: str) -> tuple[pd.DataFrame, list[str]]:
+    df = ui_list_documents(container)
+    ids = ui_list_document_ids(container)
+    return df, ids
 
 def ui_get_document(container: str, doc_id: str) -> str:
     container = (container or "").strip() or DEFAULT_CONTAINER
@@ -400,7 +473,32 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
     global API_BASE_URL
     API_BASE_URL = api_base_url.rstrip("/")
 
-    with gr.Blocks(title="IFULLMDEV UI", analytics_enabled=False) as demo:
+    CUSTOM_CSS = """
+    /* Dataframe font sizing */
+    .gr-dataframe, 
+    .gr-dataframe table, 
+    .gr-dataframe .cell, 
+    .gr-dataframe td, 
+    .gr-dataframe th {
+      font-size: 10px !important;   /* try 11px or 10px if you want smaller */
+      line-height: 1.2 !important;
+    }
+
+    /* Optional: tighten row padding so rows are shorter */
+    .gr-dataframe td, 
+    .gr-dataframe th {
+      padding-top: 4px !important;
+      padding-bottom: 4px !important;
+    }
+
+    /* Optional: prevent status column from looking massive */
+    .gr-dataframe td:first-child, 
+    .gr-dataframe th:first-child {
+      white-space: nowrap !important;
+    }
+    """
+
+    with gr.Blocks(title="IFULLMDEV UI", analytics_enabled=False, css=CUSTOM_CSS) as demo:
         gr.Markdown(
             f"""
 # IFULLMDEV (RAG + Chat)
@@ -412,16 +510,30 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
         )
 
         with gr.Tab("Blobs"):
+            gr.Markdown("""
+            ### Blobs
+
+            **Status legend**  
+            🟢 READY — valid PDF with required metadata; ready for ingestion  
+            🟠 METADATA MISSING — PDF uploaded but required metadata is missing  
+            🔴 NOT SUPPORTED — file is not a PDF or cannot be ingested
+            """)
             with gr.Row():
                 b_container = gr.Textbox(label="Blob container", value=DEFAULT_CONTAINER)
                 b_refresh = gr.Button("Refresh blobs")
-            blobs_df = gr.Dataframe(label="Blobs (/blobs)", interactive=False)
-            b_refresh.click(fn=ui_list_blobs, inputs=[b_container], outputs=[blobs_df])
+
+            blobs_df = gr.Dataframe(label="Blobs (with ingest status)", interactive=False)
+
+            b_refresh.click(
+                fn=ui_list_blobs_with_status,
+                inputs=[b_container],
+                outputs=[blobs_df],
+            )
 
             gr.Markdown("### Upload PDFs to Blob Storage")
             with gr.Row():
                 b_prefix = gr.Textbox(label="blob_prefix", value="")
-                b_files = gr.File(label="Select PDF files", file_count="multiple", file_types=[".pdf"])
+                b_files = gr.File(label="Select PDF files", file_count="multiple", file_types=None)
             b_upload = gr.Button("Upload")
             b_upload_out = gr.Code(label="Upload response", language="json")
             b_upload.click(fn=ui_upload_blobs, inputs=[b_container, b_prefix, b_files], outputs=[b_upload_out])
@@ -443,29 +555,37 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
             b_set_meta.click(fn=ui_set_blob_metadata, inputs=[b_container, blob_name, b_meta_json], outputs=[b_action_out])
 
         with gr.Tab("Documents"):
+            gr.Markdown("""
+            ### Documents
+
+            **Status legend**  
+            🟢 INDEXED — indexed and up to date  
+            🟠 STALE (REINDEX) — blob changed since last index  
+            🔴 NOT INDEXED — blob exists but not indexed
+            """)
+            
             with gr.Row():
                 container = gr.Textbox(label="Blob container", value=DEFAULT_CONTAINER)
-                refresh_docs_btn = gr.Button("Refresh documents")
+                refresh_docs_btn = gr.Button("Refresh documents + IDs")
+
             docs_df = gr.Dataframe(label="Documents (/documents)", interactive=False)
-            refresh_docs_btn.click(fn=ui_list_documents, inputs=[container], outputs=[docs_df])
 
             gr.Markdown("### Document actions")
+
+            # Define doc_id BEFORE wiring events that reference it
             with gr.Row():
                 doc_id = gr.Dropdown(label="doc_id", choices=[], allow_custom_value=True)
-                refresh_ids_btn = gr.Button("Load IDs (/documents/ids)")
+                refresh_ids_btn = gr.Button("Load IDs only")
                 get_doc_btn = gr.Button("Get doc (/documents/{doc_id})")
-            doc_json = gr.Code(label="GetDocumentResponse (JSON)", language="json")
 
-            refresh_ids_btn.click(fn=ui_list_document_ids, inputs=[container], outputs=[doc_id])
-            get_doc_btn.click(fn=ui_get_document, inputs=[container, doc_id], outputs=[doc_json])
+            doc_json = gr.Code(label="GetDocumentResponse (JSON)", language="json")
 
             with gr.Row():
                 document_type = gr.Textbox(label="document_type", value="IFU")
                 reindex_btn = gr.Button("Reindex selected")
                 delete_vectors_btn = gr.Button("Delete vectors (selected)")
+
             action_out = gr.Code(label="Action output (JSON)", language="json")
-            reindex_btn.click(fn=ui_reindex, inputs=[container, doc_id, document_type], outputs=[action_out])
-            delete_vectors_btn.click(fn=ui_delete_vectors, inputs=[doc_id], outputs=[action_out])
 
             gr.Markdown("### Bulk ingest")
             ingest_ids = gr.Textbox(
@@ -475,7 +595,33 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
             )
             ingest_btn = gr.Button("Ingest (/documents/ingest)")
             ingest_out = gr.Code(label="Ingest output (JSON)", language="json")
-            ingest_btn.click(fn=ui_ingest, inputs=[container, ingest_ids, document_type], outputs=[ingest_out])
+
+            # ---- Event wiring (AFTER doc_id exists) ----
+
+            # Refresh docs table + dropdown ids together
+            refresh_docs_btn.click(
+                fn=ui_refresh_documents_and_ids,
+                inputs=[container],
+                outputs=[docs_df, doc_id],
+            )
+
+            # Refresh just the dropdown ids
+            def _ids_update(c: str):
+                ids = ui_list_document_ids(c)
+                return gr.update(choices=ids, value=(ids[0] if ids else None))
+
+            refresh_ids_btn.click(fn=_ids_update, inputs=[container], outputs=[doc_id],)
+
+            get_doc_btn.click(fn=ui_get_document,inputs=[container, doc_id],outputs=[doc_json],)
+
+            reindex_btn.click(fn=ui_reindex,inputs=[container, doc_id, document_type],outputs=[action_out],)
+
+            delete_vectors_btn.click(fn=ui_delete_vectors,inputs=[doc_id],outputs=[action_out],)
+
+            ingest_btn.click(fn=ui_ingest,inputs=[container, ingest_ids, document_type],outputs=[ingest_out],)
+
+            # Optional: auto-load on page open (nice UX)
+            # demo.load(fn=ui_refresh_documents_and_ids,inputs=[container],outputs=[docs_df, doc_id],)
 
         with gr.Tab("Stats"):
             with gr.Row():
@@ -549,9 +695,6 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                 timer.tick(fn=tail_log_file, inputs=[log_path, tail_lines], outputs=[log_view])
             except Exception:
                 pass
-
-        # Initial load
-        refresh_docs_btn.click(fn=ui_list_documents, inputs=[container], outputs=[docs_df])
 
     return demo
 

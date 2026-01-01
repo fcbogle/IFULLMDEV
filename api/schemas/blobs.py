@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +12,10 @@ class BlobInfo(BaseModel):
     content_type: Optional[str] = None
     last_modified: Optional[str] = None
     blob_metadata: Dict[str, str] = Field(default_factory=dict)
+
+    status_code: Literal["ready", "needs_metadata", "not_ingestible"] = "needs_metadata"
+    issues: List[str] = Field(default_factory=list)
+    status: str = ""
 
 
 class ListBlobsResponse(BaseModel):
