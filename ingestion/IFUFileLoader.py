@@ -234,7 +234,7 @@ class IFUFileLoader:
             data: bytes,
             container: str,
             blob_name: str,
-            content_type: str = "application/pdf",
+            content_type: str = "application/octet-stream",
             metadata: Optional[Dict[str, str]] = None,
     ) -> str:
         if data is None:

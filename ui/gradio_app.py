@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import gradio as gr
 import pandas as pd
 import requests
+
+from utility.assets import img_to_data_uri
 
 # Environment configuration
 API_BASE_URL = os.getenv("IFU_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -157,7 +160,13 @@ def ui_upload_blobs(container: str, blob_prefix: str, files) -> str:
         p = getattr(f, "name", None)
         if not p:
             continue
-        multipart.append(("files", (Path(p).name, open(p, "rb"), "application/pdf")))
+
+        ctype, _ = mimetypes.guess_type(p)
+        ctype = ctype or "application/octet-stream"
+
+        multipart.append(
+            ("files", (Path(p).name, open(p, "rb"), ctype))
+        )
 
     if not multipart:
         return json.dumps({"error": "No valid files found"}, indent=2)
@@ -175,14 +184,17 @@ def ui_upload_blobs(container: str, blob_prefix: str, files) -> str:
                 indent=2,
             )
         return json.dumps(r.json(), indent=2)
+
     except Exception as e:
         return json.dumps({"error": f"upload failed: {e}"}, indent=2)
+
     finally:
         for _, (_, fh, _) in multipart:
             try:
                 fh.close()
             except Exception:
                 pass
+
 
 
 def ui_delete_blob(container: str, blob_name: str) -> str:
@@ -225,26 +237,82 @@ def ui_set_blob_metadata(container: str, blob_name: str, metadata_json: str) -> 
     except Exception as e:
         return json.dumps({"error": f"metadata update failed: {e}"}, indent=2)
 
+import mimetypes
+
 def ui_list_blobs_with_status(container: str) -> pd.DataFrame:
     container = (container or "").strip() or DEFAULT_CONTAINER
+
+    # 1) list blobs
     blobs_out = _get("/blobs", params={"container": container})
-    blobs = blobs_out.get("blobs") or []
+    if blobs_out.get("error"):
+        return pd.DataFrame([blobs_out])  # show the error in the table
+
+    blobs = blobs_out.get("blobs") or blobs_out.get("items") or []
+    if isinstance(blobs, dict):
+        blobs = [blobs]
     if not blobs:
         return pd.DataFrame([])
 
+    # 2) get indexed documents (to mark ingestion)
+    stats_out = _get("/stats", params={"blob_container": container})
+    indexed_docs = stats_out.get("documents") or []
+    indexed_ids = {d.get("doc_id") for d in indexed_docs if isinstance(d, dict)}
+    indexed_ids.discard(None)
+
     df = pd.DataFrame(blobs)
+
+    # Ensure we have a consistent blob name field
+    if "blob_name" not in df.columns and "name" in df.columns:
+        df["blob_name"] = df["name"]
+
+    # MIME type: prefer blob content_type, fallback to metadata if you want
+    if "content_type" in df.columns:
+        df["mime_type"] = df["content_type"]
+    else:
+        df["mime_type"] = None
+
+    # Optional fallback from metadata (only if you keep metadata)
+    # e.g. if some blobs come back without content_type from /blobs
+    if "blob_metadata" in df.columns:
+        def _meta_mime(r):
+            md = r.get("blob_metadata") or {}
+            if isinstance(md, dict):
+                return md.get("client_content_type") or md.get("content_type")
+            return None
+        df["mime_type"] = df["mime_type"].fillna(df.apply(_meta_mime, axis=1))
+
+    # status / status_detail
+    def _status_row(r) -> tuple[str, str, bool]:
+        name = r.get("blob_name")
+        ingested = bool(name in indexed_ids) if isinstance(name, str) else False
+        if ingested:
+            return "🟢", "INGESTED", True
+        return "🔴", "NOT INGESTED", False
+
+    df[["status", "status_detail", "is_ingested"]] = df.apply(
+        lambda r: pd.Series(_status_row(r)),
+        axis=1
+    )
+
+    # Add container column for clarity
+    df["container"] = container
 
     # Optional: drop noisy columns
     for col in ("blob_metadata",):
         if col in df.columns:
             df = df.drop(columns=[col])
 
-    # Put status first
-    if "status" in df.columns:
-        cols = ["status"] + [c for c in df.columns if c != "status"]
-        df = df[cols]
+    # Optional: nicer ordering
+    preferred = [
+        "status", "status_detail",
+        "blob_name",
+        "mime_type", "content_type",
+        "size", "last_modified",
+        "is_ingested", "container",
+    ]
+    cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    return df[cols]
 
-    return df
 
 
 # ---------------------------
@@ -322,10 +390,16 @@ def ui_list_document_ids(container: str) -> List[str]:
     # defensive: ensure list[str]
     return [x for x in ids if isinstance(x, str)]
 
-def ui_refresh_documents_and_ids(container: str) -> tuple[pd.DataFrame, list[str]]:
+def ui_refresh_documents_and_ids(container: str):
+    # 1) documents table
     df = ui_list_documents(container)
+
+    # 2) ids for dropdown
     ids = ui_list_document_ids(container)
-    return df, ids
+
+    # IMPORTANT: return a gr.update for the dropdown, not the raw list/tuple
+    dd = gr.update(choices=ids, value=(ids[0] if ids else None))
+    return df, dd
 
 def ui_get_document(container: str, doc_id: str) -> str:
     container = (container or "").strip() or DEFAULT_CONTAINER
@@ -473,40 +547,32 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
     global API_BASE_URL
     API_BASE_URL = api_base_url.rstrip("/")
 
-    CUSTOM_CSS = """
-    /* Dataframe font sizing */
-    .gr-dataframe, 
-    .gr-dataframe table, 
-    .gr-dataframe .cell, 
-    .gr-dataframe td, 
-    .gr-dataframe th {
-      font-size: 10px !important;   /* try 11px or 10px if you want smaller */
-      line-height: 1.2 !important;
-    }
+    with gr.Blocks(title="Blatchford IFU", analytics_enabled=False) as demo:
 
-    /* Optional: tighten row padding so rows are shorter */
-    .gr-dataframe td, 
-    .gr-dataframe th {
-      padding-top: 4px !important;
-      padding-bottom: 4px !important;
-    }
+        logo_url = img_to_data_uri("./assets/blatchford.jpeg")
 
-    /* Optional: prevent status column from looking massive */
-    .gr-dataframe td:first-child, 
-    .gr-dataframe th:first-child {
-      white-space: nowrap !important;
-    }
-    """
-
-    with gr.Blocks(title="IFULLMDEV UI", analytics_enabled=False, css=CUSTOM_CSS) as demo:
-        gr.Markdown(
+        gr.HTML(
             f"""
-# IFULLMDEV (RAG + Chat)
-**API:** `{API_BASE_URL}`  
-**Default container:** `{DEFAULT_CONTAINER}`  
-**Log file:** `{LOG_FILE}`  
-**Container filter enabled:** `{USE_CONTAINER_FILTER}`
-"""
+            <div class="ifu-header">
+              <div class="ifu-left">
+                <img class="ifu-logo-img" src="{logo_url}" alt="Blatchford logo" />
+                <div class="ifu-title">
+                  <h1>Blatchford IFU Large Language Model</h1>
+                  <p>RAG + Chat UI</p>
+                </div>
+              </div>
+
+              <div class="ifu-meta">
+                <div class="ifu-chip"><b>API</b>: <code>{API_BASE_URL}</code></div>
+                <div class="ifu-chip"><b>Container</b>: <code>{DEFAULT_CONTAINER}</code></div>
+                <div class="ifu-chip"><b>Log</b>: <code>{LOG_FILE}</code></div>
+                <div class="ifu-chip">
+                  <b>Container filter</b>:
+                  <code>{"ON" if USE_CONTAINER_FILTER else "OFF"}</code>
+                </div>
+              </div>
+            </div>
+            """
         )
 
         with gr.Tab("Blobs"):
@@ -533,7 +599,7 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
             gr.Markdown("### Upload PDFs to Blob Storage")
             with gr.Row():
                 b_prefix = gr.Textbox(label="blob_prefix", value="")
-                b_files = gr.File(label="Select PDF files", file_count="multiple", file_types=None)
+                b_files = gr.File(label="Select PDF files", file_count="multiple", file_types=[".pdf", ".txt"])
             b_upload = gr.Button("Upload")
             b_upload_out = gr.Code(label="Upload response", language="json")
             b_upload.click(fn=ui_upload_blobs, inputs=[b_container, b_prefix, b_files], outputs=[b_upload_out])
@@ -555,24 +621,62 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
             b_set_meta.click(fn=ui_set_blob_metadata, inputs=[b_container, blob_name, b_meta_json], outputs=[b_action_out])
 
         with gr.Tab("Documents"):
-            gr.Markdown("""
-            ### Documents
+            gr.Markdown(
+                """
+        ### Documents
 
-            **Status legend**  
-            🟢 INDEXED — indexed and up to date  
-            🟠 STALE (REINDEX) — blob changed since last index  
-            🔴 NOT INDEXED — blob exists but not indexed
-            """)
-            
+        **Status legend**  
+        🟢 INDEXED — indexed and up to date  
+        🟠 STALE (REINDEX) — blob changed since last index  
+        🔴 NOT INDEXED — blob exists but not indexed
+        """
+            )
+
+            # Top controls
             with gr.Row():
                 container = gr.Textbox(label="Blob container", value=DEFAULT_CONTAINER)
                 refresh_docs_btn = gr.Button("Refresh documents + IDs")
 
             docs_df = gr.Dataframe(label="Documents (/documents)", interactive=False)
 
+            # -----------------------
+            # Bulk ingest (moved UP)
+            # -----------------------
+            gr.Markdown("### Bulk ingest")
+
+            # Picker left, load button right (matches Blobs look/feel)
+            with gr.Row():
+                ingest_select = gr.Dropdown(
+                    label="Select doc_ids to ingest",
+                    choices=[],
+                    multiselect=True,
+                    value=[],
+                    allow_custom_value=False,
+                    scale=4,
+                )
+                ingest_ids_btn = gr.Button(
+                    "Load IDs for bulk ingest",
+                    scale=1,
+                )
+
+            # Optional textbox (lets you paste IDs too, or just use selected)
+            ingest_ids = gr.Textbox(
+                label="doc_ids (comma or newline separated) — optional",
+                placeholder="BMK2IFU.pdf\nSAKLIFU.pdf",
+                lines=4,
+            )
+
+            with gr.Row():
+                ingest_use_selected_btn = gr.Button("Use selected IDs")
+                ingest_btn = gr.Button("Ingest (/documents/ingest)")
+
+            ingest_out = gr.Code(label="Ingest output (JSON)", language="json")
+
+            # ----------------
+            # Document actions
+            # ----------------
             gr.Markdown("### Document actions")
 
-            # Define doc_id BEFORE wiring events that reference it
             with gr.Row():
                 doc_id = gr.Dropdown(label="doc_id", choices=[], allow_custom_value=True)
                 refresh_ids_btn = gr.Button("Load IDs only")
@@ -587,16 +691,29 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
 
             action_out = gr.Code(label="Action output (JSON)", language="json")
 
-            gr.Markdown("### Bulk ingest")
-            ingest_ids = gr.Textbox(
-                label="doc_ids (comma or newline separated)",
-                placeholder="BMK2IFU.pdf\nSAKLIFU.pdf",
-                lines=4,
-            )
-            ingest_btn = gr.Button("Ingest (/documents/ingest)")
-            ingest_out = gr.Code(label="Ingest output (JSON)", language="json")
+            # ---------
+            # Callbacks
+            # ---------
+            def _ids_update(c: str):
+                ids = ui_list_document_ids(c)
+                return gr.update(choices=ids, value=(ids[0] if ids else None))
 
-            # ---- Event wiring (AFTER doc_id exists) ----
+            def _bulk_ids_update(c: str):
+                ids = ui_list_document_ids(c)
+                return gr.update(choices=ids, value=[])
+
+            def _selected_to_text(selected):
+                selected = selected or []
+                return "\n".join(selected)
+
+            def _ingest_from_ui(c: str, selected, typed: str, doc_type: str) -> str:
+                selected = selected or []
+                doc_ids_text = "\n".join(selected) if selected else (typed or "")
+                return ui_ingest(c, doc_ids_text, doc_type)
+
+            # -------------
+            # Event wiring
+            # -------------
 
             # Refresh docs table + dropdown ids together
             refresh_docs_btn.click(
@@ -605,23 +722,25 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                 outputs=[docs_df, doc_id],
             )
 
-            # Refresh just the dropdown ids
-            def _ids_update(c: str):
-                ids = ui_list_document_ids(c)
-                return gr.update(choices=ids, value=(ids[0] if ids else None))
+            # Refresh just the dropdown ids (Document actions)
+            refresh_ids_btn.click(fn=_ids_update, inputs=[container], outputs=[doc_id])
 
-            refresh_ids_btn.click(fn=_ids_update, inputs=[container], outputs=[doc_id],)
+            # Document actions -> outputs
+            get_doc_btn.click(fn=ui_get_document, inputs=[container, doc_id], outputs=[doc_json])
+            reindex_btn.click(fn=ui_reindex, inputs=[container, doc_id, document_type], outputs=[action_out])
+            delete_vectors_btn.click(fn=ui_delete_vectors, inputs=[doc_id], outputs=[action_out])
 
-            get_doc_btn.click(fn=ui_get_document,inputs=[container, doc_id],outputs=[doc_json],)
+            # Bulk ingest picker wiring
+            ingest_ids_btn.click(fn=_bulk_ids_update, inputs=[container], outputs=[ingest_select])
+            ingest_use_selected_btn.click(fn=_selected_to_text, inputs=[ingest_select], outputs=[ingest_ids])
+            ingest_btn.click(
+                fn=_ingest_from_ui,
+                inputs=[container, ingest_select, ingest_ids, document_type],
+                outputs=[ingest_out],
+            )
 
-            reindex_btn.click(fn=ui_reindex,inputs=[container, doc_id, document_type],outputs=[action_out],)
-
-            delete_vectors_btn.click(fn=ui_delete_vectors,inputs=[doc_id],outputs=[action_out],)
-
-            ingest_btn.click(fn=ui_ingest,inputs=[container, ingest_ids, document_type],outputs=[ingest_out],)
-
-            # Optional: auto-load on page open (nice UX)
-            # demo.load(fn=ui_refresh_documents_and_ids,inputs=[container],outputs=[docs_df, doc_id],)
+            # Optional: auto-load on page open (leave commented if you don't want pre-load)
+            # demo.load(fn=ui_refresh_documents_and_ids, inputs=[container], outputs=[docs_df, doc_id])
 
         with gr.Tab("Stats"):
             with gr.Row():

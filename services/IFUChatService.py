@@ -158,7 +158,9 @@ class IFUChatService:
             "You are an assistant helping with medical device IFU content. "
             "Answer ONLY using the provided context. "
             "If the context does not contain the answer, say you don't have enough information and ask what to check. "
-            "When you use facts from context, cite them using [#] indices."
+            "When you use facts from context, cite them using [#] indices. "
+            "Formatting: default to 1–3 sentences. Avoid block formatting unless the user asks. "
+            "If an address appears in context, present it inline in a sentence."
         )
 
         messages: List[Message] = [{"role": "system", "content": system}]
@@ -172,8 +174,13 @@ class IFUChatService:
                     messages.append({"role": role, "content": content})
 
         user = (
-            f"Question:\n{question}\n\n"
-            f"Context:\n{context if context else '[no context retrieved]'}\n\n"
+            "Please answer the question below using only the information provided in the context. "
+            "Write in clear, natural prose (not bullet points or copied blocks). "
+            "If the answer involves structured information (e.g. steps, warnings, contact details), "
+            "integrate it smoothly into sentences. "
+            "If the context does not contain enough information, say so briefly and suggest what to check.\n\n"
+            f"Question: {question}\n\n"
+            f"Context (for reference only, do not quote verbatim):\n{context if context else '[no context retrieved]'}\n\n"
             "Answer:"
         )
         messages.append({"role": "user", "content": user})

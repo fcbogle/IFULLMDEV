@@ -218,7 +218,7 @@ def _blob_status(b: Dict[str, Any]) -> Dict[str, Any]:
     status_label = {
         "ready": "🟢 READY",
         "needs_metadata": "🟠 NEEDS METADATA",
-        "not_ingestible": "🔴 NOT INGESTIBLE",
+        "not_ingestible": "🔴 NOT SUPPORTED",
     }[status_code]
 
     return {

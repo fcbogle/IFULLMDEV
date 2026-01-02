@@ -5,16 +5,15 @@
 # -----------------------------------------------------------------------------
 from __future__ import annotations
 
-import logging
+import mimetypes
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from azure.core.exceptions import AzureError, ResourceNotFoundError
-from azure.storage.blob import ContentSettings
 from fastapi import UploadFile
 
-from utility.logging_utils import get_class_logger
 from ingestion.IFUFileLoader import IFUFileLoader
+from utility.logging_utils import get_class_logger
 
 REQUIRED_BLOB_META_KEYS = ["document_type"]
 
@@ -190,11 +189,6 @@ class IFUBlobService:
             files: List[UploadFile],
             default_metadata: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
-        """
-        Upload multiple uploaded files to Azure Blob Storage.
-
-        NOTE: UploadFile.read() is async, so this method is async.
-        """
         self.logger.info(
             "upload_files: container='%s' prefix='%s' files=%d (start)",
             container, blob_prefix, len(files)
@@ -212,27 +206,56 @@ class IFUBlobService:
                 data = await f.read()
                 size = len(data) if data else 0
 
-                # keep metadata small + string->string
+                raw_ct = (f.content_type or "").strip().lower()  # from client/multipart
+                guessed_ct, _ = mimetypes.guess_type(filename)
+                guessed_ct = (guessed_ct or "").strip().lower()
+
+                # --- choose final content type ---
+                ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+                is_pdf_name = filename.lower().endswith(".pdf")
+
+                # raw_ct is often wrong; override when it contradicts filename/guess
+                if is_pdf_name:
+                    # force pdf unless client gave something better than empty/generic
+                    final_ct = raw_ct or "application/pdf"
+                    if final_ct in ("application/octet-stream", "binary/octet-stream", ""):
+                        final_ct = "application/pdf"
+                else:
+                    # not a pdf filename -> do NOT trust raw_ct if it's pdf or generic
+                    if raw_ct in ("application/pdf", "application/octet-stream", "binary/octet-stream", ""):
+                        final_ct = guessed_ct or "application/octet-stream"
+                    else:
+                        # client provided something non-generic; keep it
+                        final_ct = raw_ct
+
                 metadata = dict(default_metadata or {})
                 metadata.setdefault("source", "ui_upload")
                 metadata.setdefault("filename", filename)
+                # optional: keep a trace of what the client claimed
+                if raw_ct:
+                    metadata.setdefault("client_content_type", raw_ct)
 
                 self.logger.info(
-                    "upload_files: uploading filename='%s' -> blob='%s' bytes=%d",
-                    filename, blob_name, size
+                    "upload_files: uploading filename='%s' -> blob='%s' bytes=%d raw_ct='%s' guessed_ct='%s' final_ct='%s'",
+                    filename, blob_name, size, raw_ct, guessed_ct, final_ct
                 )
 
-                # You need this method on IFUFileLoader (shown below)
                 self.file_loader.upload_document_bytes(
                     data=data,
                     container=container,
                     blob_name=blob_name,
-                    content_type=f.content_type or "application/pdf",
+                    content_type=final_ct,
                     metadata=metadata,
                 )
 
                 uploaded += 1
-                results.append({"filename": filename, "blob_name": blob_name, "bytes": size, "ok": True})
+                results.append({
+                    "filename": filename,
+                    "blob_name": blob_name,
+                    "bytes": size,
+                    "ok": True,
+                    "content_type": final_ct,
+                })
 
             except Exception as e:
                 errors += 1
@@ -245,8 +268,13 @@ class IFUBlobService:
                 except Exception:
                     pass
 
-        out = {"container": container, "blob_prefix": blob_prefix, "uploaded": uploaded, "errors": errors,
-               "results": results}
+        out = {
+            "container": container,
+            "blob_prefix": blob_prefix,
+            "uploaded": uploaded,
+            "errors": errors,
+            "results": results,
+        }
         self.logger.info("upload_files: container='%s' uploaded=%d errors=%d (done)", container, uploaded, errors)
         return out
 
