@@ -14,29 +14,51 @@ from ui.gradio_app import build_gradio_app
 
 CUSTOM_CSS = """
 /* =========================================================
+   Global knobs (easy to tweak)
+   ========================================================= */
+:root {
+  --ifu-df-font-size: 10px;
+  --ifu-df-line-height: 1.2;
+  --ifu-df-pad-y: 4px;
+
+  --ifu-header-radius: 14px;
+  --ifu-border: 1px solid rgba(120, 120, 120, 0.25);
+}
+
+
+/* =========================================================
    DataFrame styling (compact, readable tables)
+   Notes:
+   - Gradio DataFrame markup can vary by version.
+   - These selectors intentionally “over-match” a bit.
    ========================================================= */
 
+/* Outer dataframe container(s) */
 .gr-dataframe,
-.gr-dataframe table,
-.gr-dataframe .cell,
-.gr-dataframe td,
-.gr-dataframe th {
-  font-size: 10px !important;
-  line-height: 1.2 !important;
+.gr-dataframe * {
+  font-size: var(--ifu-df-font-size) !important;
+  line-height: var(--ifu-df-line-height) !important;
 }
 
-/* Tighten row padding so rows are shorter */
+/* Table cells (padding/row height) */
 .gr-dataframe td,
 .gr-dataframe th {
-  padding-top: 4px !important;
-  padding-bottom: 4px !important;
+  padding-top: var(--ifu-df-pad-y) !important;
+  padding-bottom: var(--ifu-df-pad-y) !important;
 }
 
-/* Prevent status / icon column from expanding */
+/* Prevent status/icon column from expanding */
 .gr-dataframe td:first-child,
 .gr-dataframe th:first-child {
   white-space: nowrap !important;
+}
+
+/* Optional: keep long text from exploding column widths */
+.gr-dataframe td,
+.gr-dataframe th {
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 
@@ -52,8 +74,8 @@ CUSTOM_CSS = """
   padding: 14px 18px;
   margin-bottom: 14px;
 
-  border-radius: 14px;
-  border: 1px solid rgba(120, 120, 120, 0.25);
+  border-radius: var(--ifu-header-radius);
+  border: var(--ifu-border);
   background: rgba(250, 250, 250, 0.9);
 }
 
@@ -63,6 +85,7 @@ CUSTOM_CSS = """
   gap: 12px;
 }
 
+/* If you use text-only logo block */
 .ifu-logo {
   width: 38px;
   height: 38px;
@@ -72,10 +95,11 @@ CUSTOM_CSS = """
 
   font-weight: 700;
   border-radius: 10px;
-  border: 1px solid rgba(120, 120, 120, 0.25);
+  border: var(--ifu-border);
   background: #ffffff;
 }
 
+/* Title */
 .ifu-title h1 {
   margin: 0;
   font-size: 18px;
@@ -88,6 +112,7 @@ CUSTOM_CSS = """
   opacity: 0.75;
 }
 
+/* Chips on the right */
 .ifu-meta {
   display: flex;
   flex-wrap: wrap;
@@ -100,7 +125,7 @@ CUSTOM_CSS = """
   padding: 6px 10px;
 
   border-radius: 999px;
-  border: 1px solid rgba(120, 120, 120, 0.25);
+  border: var(--ifu-border);
   background: #ffffff;
 
   white-space: nowrap;
@@ -110,13 +135,15 @@ CUSTOM_CSS = """
   font-size: 12px;
 }
 
+/* If you use an <img class="ifu-logo-img" ...> */
 .ifu-logo-img {
   width: 60px;
   height: 60px;
   object-fit: contain;
+
   border-radius: 10px;
-  border: 1px solid rgba(120,120,120,.25);
-  background: white;
+  border: var(--ifu-border);
+  background: #ffffff;
   padding: 4px;
 }
 """
