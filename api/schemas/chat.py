@@ -13,17 +13,14 @@ from api.schemas.query import QueryHit
 
 class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1)
-
-    # Retrieval controls (mirror /query)
     n_results: int = Field(5, ge=1, le=20)
     where: Optional[Dict[str, Any]] = None
-
-    # Prompt / model controls
     temperature: float = Field(0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(512, ge=1, le=4096)
-
-    # Optional: pass conversation history in later iterations
     history: Optional[List[Dict[str, str]]] = None
+    tone: str = Field("neutral")
+    language: str = Field("en")
+
 
 
 class ChatSource(BaseModel):

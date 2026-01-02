@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import mimetypes
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -86,13 +85,17 @@ def _combine_where(parts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def _build_where(
-    *,
-    container: str,
-    lang_en_only: bool,
-    where_json: str,
+        *,
+        container: str,
+        lang: str,
+        where_json: str,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Returns (where, error_message).
+
+    language:
+      - "any" / "" / None => no lang filter
+      - otherwise => {"lang": {"$eq": <language>}}
     """
     base_where: Optional[Dict[str, Any]] = None
     where_json = (where_json or "").strip()
@@ -109,9 +112,12 @@ def _build_where(
     if base_where:
         parts.append(base_where)
 
-    if lang_en_only:
-        parts.append({"lang": {"$eq": "en"}})
+    # ---- Language filter ----
+    lang = (lang or "").strip().lower()
+    if lang and lang != "any":
+        parts.append({"lang": {"$eq": lang}})
 
+    # ---- Optional container filter ----
     if USE_CONTAINER_FILTER:
         parts.append({"container": {"$eq": container}})
 
@@ -196,7 +202,6 @@ def ui_upload_blobs(container: str, blob_prefix: str, files) -> str:
                 pass
 
 
-
 def ui_delete_blob(container: str, blob_name: str) -> str:
     container = (container or "").strip() or DEFAULT_CONTAINER
     blob_name = (blob_name or "").strip()
@@ -237,7 +242,9 @@ def ui_set_blob_metadata(container: str, blob_name: str, metadata_json: str) -> 
     except Exception as e:
         return json.dumps({"error": f"metadata update failed: {e}"}, indent=2)
 
+
 import mimetypes
+
 
 def ui_list_blobs_with_status(container: str) -> pd.DataFrame:
     container = (container or "").strip() or DEFAULT_CONTAINER
@@ -279,6 +286,7 @@ def ui_list_blobs_with_status(container: str) -> pd.DataFrame:
             if isinstance(md, dict):
                 return md.get("client_content_type") or md.get("content_type")
             return None
+
         df["mime_type"] = df["mime_type"].fillna(df.apply(_meta_mime, axis=1))
 
     # status / status_detail
@@ -314,7 +322,6 @@ def ui_list_blobs_with_status(container: str) -> pd.DataFrame:
     return df[cols]
 
 
-
 # ---------------------------
 # Documents UI functions
 # ---------------------------
@@ -325,6 +332,7 @@ def ui_get_stats(container: str) -> Tuple[str, pd.DataFrame, pd.DataFrame]:
     docs_df = pd.DataFrame(stats.get("documents") or [])
     blobs_df = pd.DataFrame(stats.get("blobs") or [])
     return stats_json, docs_df, blobs_df
+
 
 def ui_list_documents(container: str) -> pd.DataFrame:
     container = (container or "").strip() or DEFAULT_CONTAINER
@@ -383,12 +391,14 @@ def ui_list_documents(container: str) -> pd.DataFrame:
 
     return df
 
+
 def ui_list_document_ids(container: str) -> List[str]:
     container = (container or "").strip() or DEFAULT_CONTAINER
     out = _get("/documents/ids", params={"container": container})
     ids = out.get("doc_ids") or []
     # defensive: ensure list[str]
     return [x for x in ids if isinstance(x, str)]
+
 
 def ui_refresh_documents_and_ids(container: str):
     # 1) documents table
@@ -400,6 +410,7 @@ def ui_refresh_documents_and_ids(container: str):
     # IMPORTANT: return a gr.update for the dropdown, not the raw list/tuple
     dd = gr.update(choices=ids, value=(ids[0] if ids else None))
     return df, dd
+
 
 def ui_get_document(container: str, doc_id: str) -> str:
     container = (container or "").strip() or DEFAULT_CONTAINER
@@ -447,13 +458,13 @@ def ui_delete_vectors(doc_id: str) -> str:
 # ---------------------------
 # Query UI functions
 # ---------------------------
-def ui_query(container: str, query_text: str, n_results: int, lang_en_only: bool, where_json: str) -> pd.DataFrame:
+def ui_query(container: str, query_text: str, n_results: int, language: str, where_json: str) -> pd.DataFrame:
     container = (container or "").strip() or DEFAULT_CONTAINER
     query_text = (query_text or "").strip()
     if not query_text:
         return pd.DataFrame([{"error": "query must not be empty"}])
 
-    where, err = _build_where(container=container, lang_en_only=lang_en_only, where_json=where_json)
+    where, err = _build_where(container=container, lang=language, where_json=where_json)
     if err:
         return pd.DataFrame([{"error": err}])
 
@@ -475,17 +486,17 @@ def ui_query(container: str, query_text: str, n_results: int, lang_en_only: bool
 # Chat UI functions (messages format)
 # ---------------------------
 def ui_chat(
-    container: str,
-    question: str,
-    n_results: int,
-    lang_en_only: bool,
-    where_json: str,
-    temperature: float,
-    max_tokens: int,
-    chat_messages: List[Dict[str, str]] | None,  # for gr.Chatbot (messages)
-    api_history: List[Dict[str, str]] | None,    # for /chat (OpenAI-style)
+        container: str,
+        question: str,
+        n_results: int,
+        lang: str,
+        where_json: str,
+        temperature: float,
+        max_tokens: int,
+        chat_messages: List[Dict[str, str]] | None,
+        api_history: List[Dict[str, str]] | None,
+        tone: str,
 ) -> Tuple[List[Dict[str, str]], str, pd.DataFrame, List[Dict[str, str]]]:
-
     container = (container or "").strip() or DEFAULT_CONTAINER
     question = (question or "").strip()
 
@@ -495,7 +506,7 @@ def ui_chat(
     if not question:
         return chat_messages, "", pd.DataFrame(), api_history
 
-    where, err = _build_where(container=container, lang_en_only=lang_en_only, where_json=where_json)
+    where, err = _build_where(container=container, lang=lang, where_json=where_json)
     if err:
         # show error in chat but keep UI usable
         chat_messages = chat_messages + [{"role": "assistant", "content": err}]
@@ -505,6 +516,8 @@ def ui_chat(
         "question": question,
         "n_results": int(n_results),
         "where": where,
+        "tone": tone,
+        "language": lang,
         "temperature": float(temperature),
         "max_tokens": int(max_tokens),
         "history": api_history or None,
@@ -618,7 +631,8 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                 lines=4,
             )
             b_set_meta = gr.Button("Set metadata")
-            b_set_meta.click(fn=ui_set_blob_metadata, inputs=[b_container, blob_name, b_meta_json], outputs=[b_action_out])
+            b_set_meta.click(fn=ui_set_blob_metadata, inputs=[b_container, blob_name, b_meta_json],
+                             outputs=[b_action_out])
 
         with gr.Tab("Documents"):
             gr.Markdown(
@@ -749,7 +763,8 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
             stats_json = gr.Code(label="Stats JSON", language="json")
             stats_docs_df = gr.Dataframe(label="Indexed documents", interactive=False)
             stats_blobs_df = gr.Dataframe(label="Blobs", interactive=False)
-            stats_btn.click(fn=ui_get_stats, inputs=[stats_container], outputs=[stats_json, stats_docs_df, stats_blobs_df])
+            stats_btn.click(fn=ui_get_stats, inputs=[stats_container],
+                            outputs=[stats_json, stats_docs_df, stats_blobs_df])
 
         with gr.Tab("Query"):
             with gr.Row():
@@ -773,10 +788,15 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
             with gr.Row():
                 c_temp = gr.Slider(0.0, 2.0, value=0.0, step=0.1, label="temperature")
                 c_max = gr.Slider(64, 4096, value=512, step=64, label="max_tokens")
+                c_tone = gr.Dropdown(label="Tone", choices=["neutral", "plain", "technical", "regulatory", "training"],
+                                     value="neutral", )
+                c_lang = gr.Dropdown(label="Language",
+                                     choices=["en", "fr", "de", "es", "it", "nl", "pt", "pl", "cs", "id", "ca", "ro"],
+                                     value="en", )
 
             # States: keep both message history and API history
             chat_messages_state = gr.State([])  # list[{role,content}]
-            chat_api_state = gr.State([])       # list[{role,content}]
+            chat_api_state = gr.State([])  # list[{role,content}]
 
             chatbot = gr.Chatbot(label="Chat", height=420)
             question = gr.Textbox(label="Question", placeholder="Ask something about the IFU…")
@@ -787,7 +807,18 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
 
             send_btn.click(
                 fn=ui_chat,
-                inputs=[c_container, question, c_n, c_en, c_where, c_temp, c_max, chat_messages_state, chat_api_state],
+                inputs=[
+                    c_container,  # container
+                    question,  # question
+                    c_n,  # n_results
+                    c_lang,  # lang (dropdown)
+                    c_where,  # where_json
+                    c_temp,  # temperature
+                    c_max,  # max_tokens
+                    chat_messages_state,
+                    chat_api_state,
+                    c_tone,  # tone dropdown
+                ],
                 outputs=[chatbot, chat_debug, sources_df, chat_api_state],
             ).then(
                 # keep chatbot value and also store updated messages state
@@ -816,6 +847,3 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                 pass
 
     return demo
-
-
-

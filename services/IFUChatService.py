@@ -1,35 +1,35 @@
-# -----------------------------------------------------------------------------
-# Author: Frank Campbell Bogle
-# Created: 2025-12-28
-# Description: services/IFUChatService.py
-# -----------------------------------------------------------------------------
+# services/IFUChatService.py
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from utility.logging_utils import get_class_logger
 from services.IFUQueryService import IFUQueryService
-from chat.OpenAIChat import OpenAIChat, Message
+from chat.OpenAIChat import OpenAIChat
 
 
 @dataclass
 class IFUChatService:
-    """
-    RAG chat service:
-      - retrieve context via IFUQueryService
-      - construct a grounded prompt
-      - call OpenAIChat
-      - return answer + sources
-    """
+    TONE_PRESETS: ClassVar[Dict[str, str]] = {
+        "neutral": "Answer clearly and accurately.",
+        "plain": (
+            "Answer in plain English. Avoid jargon. Explain acronyms. "
+            "Assume the reader is not technical."
+        ),
+        "technical": "Answer as a technical expert. Use precise terminology and structure.",
+        "regulatory": (
+            "Answer in a regulatory and clinical tone. Be precise, cautious, and factual. "
+            "Do not speculate. Reference standards where relevant."
+        ),
+        "training": "Answer as a training instructor. Use step-by-step guidance and clear instructions.",
+    }
 
     query_service: IFUQueryService
     chat_client: OpenAIChat
     logger: Any = None
 
-    # prompt knobs
-    max_context_chars: int = 12000  # keeps prompts sane without tokenizers
+    max_context_chars: int = 12000
     include_scores_in_prompt: bool = True
 
     def __post_init__(self) -> None:
@@ -49,103 +49,85 @@ class IFUChatService:
         temperature: float = 0.0,
         max_tokens: int = 512,
         history: Optional[List[Dict[str, str]]] = None,
+        tone: str = "neutral",
+        language: str = "en",
     ) -> Dict[str, Any]:
         q = (question or "").strip()
         if not q:
             raise ValueError("question must not be empty")
 
+        tone_key = (tone or "neutral").strip().lower()
+        if tone_key not in self.TONE_PRESETS:
+            self.logger.warning("ask: unknown tone='%s' -> defaulting to neutral", tone_key)
+            tone_key = "neutral"
+
+        lang = (language or "en").strip().lower()
+
         self.logger.info(
-            "ask: question_len=%d n_results=%d where=%s temp=%.2f max_tokens=%d (start)",
+            "ask: question_len=%d n_results=%d where=%s temp=%.2f max_tokens=%d tone=%s lang=%s (start)",
             len(q),
             n_results,
             "yes" if where else "no",
-            temperature,
-            max_tokens,
+            float(temperature),
+            int(max_tokens),
+            tone_key,
+            lang,
         )
 
         # 1) Retrieve
-        try:
-            raw = self.query_service.query(query_text=q, n_results=n_results, where=where)
-            hits = self.query_service.to_hits(
-                raw,
-                include_text=True,
-                include_scores=True,
-                include_metadata=True,
-            )
-            self.logger.info("ask: retrieved_hits=%d (done)", len(hits))
-        except Exception as e:
-            self.logger.error("ask: retrieval failed: %s", e, exc_info=True)
-            raise
+        raw = self.query_service.query(query_text=q, n_results=n_results, where=where)
+        hits = self.query_service.to_hits(raw, include_text=True, include_scores=True, include_metadata=True)
+        self.logger.info("ask: retrieved_hits=%d", len(hits))
 
-        # 2) Build context text
+        # 2) Build context
         context_text = self._build_context(hits)
 
-        # 3) Compose messages
+        # 3) Compose messages (tone in system prompt)
         messages = self._build_messages(
             question=q,
             context=context_text,
             history=history,
+            tone=tone_key,
+            language=lang,
         )
 
-        # 4) Call OpenAI
-        try:
-            resp = self.chat_client.chat(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            answer = (resp.choices[0].message.content or "").strip()
-            usage = getattr(resp, "usage", None)
-            model = getattr(resp, "model", None)
-
-            self.logger.info("ask: answer_len=%d model=%s usage=%r (done)", len(answer), model, usage)
-        except Exception as e:
-            self.logger.error("ask: LLM call failed: %s", e, exc_info=True)
-            raise
+        # 4) Call LLM
+        resp = self.chat_client.chat(messages=messages, temperature=float(temperature), max_tokens=int(max_tokens))
+        answer = (resp.choices[0].message.content or "").strip()
+        usage = getattr(resp, "usage", None)
+        model = getattr(resp, "model", None)
 
         return {
             "question": q,
             "answer": answer,
-            "sources": hits,  # return raw hits; router can map to schema
+            "sources": hits,
+            "tone": tone_key,
+            "language": lang,
             "model": model,
             "usage": usage.model_dump() if hasattr(usage, "model_dump") else (usage if isinstance(usage, dict) else None),
         }
 
     def _build_context(self, hits: List[Dict[str, Any]]) -> str:
-        """
-        Build a compact context pack. Keep it deterministic and easy to cite:
-        [1] doc_id=... page=... chunk_id=... score=...
-            <text>
-        """
         parts: List[str] = []
         used = 0
 
         for idx, h in enumerate(hits, start=1):
-            doc_id = h.get("doc_id")
-            page = h.get("page")
-            chunk_id = h.get("chunk_id")
-            score = h.get("score")
             text = (h.get("text") or "").strip()
-
-            header = f"[{idx}] doc_id={doc_id} page={page} chunk_id={chunk_id}"
-            if self.include_scores_in_prompt:
-                header += f" score={score}"
-
-            block = header + "\n" + text
             if not text:
                 continue
 
-            # crude char limit (works well enough without token counting)
+            header = f"[{idx}] doc_id={h.get('doc_id')} page={h.get('page')} chunk_id={h.get('chunk_id')}"
+            if self.include_scores_in_prompt:
+                header += f" score={h.get('score')}"
+
+            block = header + "\n" + text
             if used + len(block) > self.max_context_chars:
-                self.logger.info("build_context: hit_limit reached at %d hits (chars=%d)", idx - 1, used)
                 break
 
             parts.append(block)
             used += len(block) + 2
 
-        context = "\n\n".join(parts).strip()
-        self.logger.info("build_context: context_chars=%d hits_used=%d", len(context), len(parts))
-        return context
+        return "\n\n".join(parts).strip()
 
     def _build_messages(
         self,
@@ -153,39 +135,41 @@ class IFUChatService:
         question: str,
         context: str,
         history: Optional[List[Dict[str, str]]] = None,
-    ) -> List[Message]:
-        system = (
-            "You are an assistant helping with medical device IFU content. "
-            "Answer ONLY using the provided context. "
-            "If the context does not contain the answer, say you don't have enough information and ask what to check. "
-            "When you use facts from context, cite them using [#] indices. "
-            "Formatting: default to 1–3 sentences. Avoid block formatting unless the user asks. "
-            "If an address appears in context, present it inline in a sentence."
+        tone: str = "neutral",
+        language: str = "en",
+    ) -> List[Dict[str, str]]:
+        tone_instruction = self.TONE_PRESETS.get(tone, self.TONE_PRESETS["neutral"])
+
+        lang = (language or "en").strip().lower()
+        language_instruction = (
+            f"Respond in {lang}. If the user writes in {lang}, keep the same language. "
+            f"Do not switch languages unless the user asks."
         )
 
-        messages: List[Message] = [{"role": "system", "content": system}]
+        system = (
+            "You are an assistant helping with medical device IFU content.\n"
+            "Answer ONLY using the provided context.\n"
+            "If the context does not contain the answer, say you don't have enough information and suggest what to check.\n"
+            "When you use facts from context, cite them using [#] indices.\n"
+            "Formatting: default to 1–3 sentences unless the user asks for steps.\n\n"
+            f"LANGUAGE:\n{language_instruction}\n\n"
+            f"TONE:\n{tone_instruction}"
+        )
 
-        # Optional chat history (v2)
-        if history:
-            for m in history:
-                role = (m.get("role") or "").strip()
-                content = (m.get("content") or "").strip()
-                if role in ("user", "assistant") and content:
-                    messages.append({"role": role, "content": content})
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
+
+        for m in (history or []):
+            role = (m.get("role") or "").strip()
+            content = (m.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
 
         user = (
-            "Please answer the question below using only the information provided in the context. "
-            "Write in clear, natural prose (not bullet points or copied blocks). "
-            "If the answer involves structured information (e.g. steps, warnings, contact details), "
-            "integrate it smoothly into sentences. "
-            "If the context does not contain enough information, say so briefly and suggest what to check.\n\n"
-            f"Question: {question}\n\n"
-            f"Context (for reference only, do not quote verbatim):\n{context if context else '[no context retrieved]'}\n\n"
+            f"Question:\n{question}\n\n"
+            f"Context:\n{context if context else '[no context retrieved]'}\n\n"
             "Answer:"
         )
         messages.append({"role": "user", "content": user})
-
-        self.logger.debug("build_messages: messages=%d context_present=%s", len(messages), bool(context))
         return messages
 
 

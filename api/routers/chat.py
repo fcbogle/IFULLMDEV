@@ -35,6 +35,7 @@ def post_chat(
             temperature=req.temperature,
             max_tokens=req.max_tokens,
             history=req.history,
+            tone=req.tone,
         )
     except Exception as e:
         logger.exception("post_chat failed: %s", e)
