@@ -584,6 +584,7 @@ def ui_chat(
         return chat_messages, "", pd.DataFrame(), api_history
 
     payload = {
+        "container": container,
         "question": question,
         "n_results": int(n_results),
         "where": where,

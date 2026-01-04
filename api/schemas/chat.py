@@ -12,6 +12,7 @@ from api.schemas.query import QueryHit
 
 
 class ChatRequest(BaseModel):
+    container: str = Field("ifu-docs-test", min_length=1)
     question: str = Field(..., min_length=1)
     n_results: int = Field(5, ge=1, le=20)
     where: Optional[Dict[str, Any]] = None
@@ -20,6 +21,7 @@ class ChatRequest(BaseModel):
     history: Optional[List[Dict[str, str]]] = None
     tone: str = Field("neutral")
     language: str = Field("en")
+    stats_context: Optional[str] = None
 
 
 

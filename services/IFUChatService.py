@@ -51,6 +51,7 @@ class IFUChatService:
         history: Optional[List[Dict[str, str]]] = None,
         tone: str = "neutral",
         language: str = "en",
+        stats_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         q = (question or "").strip()
         if not q:
@@ -64,14 +65,14 @@ class IFUChatService:
         lang = (language or "en").strip().lower()
 
         self.logger.info(
-            "ask: question_len=%d n_results=%d where=%s temp=%.2f max_tokens=%d tone=%s lang=%s (start)",
+            "ask: q_len=%d n_results=%d tone=%s lang=%s where=%s stats_ctx=%s stats_len=%d",
             len(q),
             n_results,
-            "yes" if where else "no",
-            float(temperature),
-            int(max_tokens),
             tone_key,
-            lang,
+            language,
+            "yes" if where else "no",
+            "yes" if stats_context else "no",
+            len(stats_context or ""),
         )
 
         # 1) Retrieve
@@ -89,6 +90,7 @@ class IFUChatService:
             history=history,
             tone=tone_key,
             language=lang,
+            stats_context=stats_context,
         )
 
         # 4) Call LLM
@@ -137,6 +139,7 @@ class IFUChatService:
         history: Optional[List[Dict[str, str]]] = None,
         tone: str = "neutral",
         language: str = "en",
+        stats_context: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         tone_instruction = self.TONE_PRESETS.get(tone, self.TONE_PRESETS["neutral"])
 
@@ -165,11 +168,24 @@ class IFUChatService:
             if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": content})
 
+        stats_block = ""
+        if stats_context:
+            stats_block = f"SYSTEM STATE (authoritative; from /stats)\n{stats_context}\n\n"
+
         user = (
+            "Please answer the question below using only the information provided in the context. "
+            "Do not quote the context verbatim.\n\n"
             f"Question:\n{question}\n\n"
-            f"Context:\n{context if context else '[no context retrieved]'}\n\n"
+            f"Context:\n{stats_block}{context if context else '[no context retrieved]'}\n\n"
             "Answer:"
         )
+
+        self.logger.debug(
+            "build_messages: stats_ctx_present=%s stats_len=%d",
+            bool(stats_context),
+            len(stats_context or ""),
+        )
+
         messages.append({"role": "user", "content": user})
         return messages
 
