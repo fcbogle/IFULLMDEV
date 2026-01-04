@@ -132,15 +132,25 @@ class IFUChatService:
         return "\n\n".join(parts).strip()
 
     def _build_messages(
-        self,
-        *,
-        question: str,
-        context: str,
-        history: Optional[List[Dict[str, str]]] = None,
-        tone: str = "neutral",
-        language: str = "en",
-        stats_context: Optional[str] = None,
+            self,
+            *,
+            question: str,
+            context: str,
+            history: Optional[List[Dict[str, str]]] = None,
+            tone: str = "neutral",
+            language: str = "en",
+            stats_context: Optional[str] = None,
     ) -> List[Dict[str, str]]:
+        """
+        Build OpenAI-style chat messages using:
+          - system prompt (rules + language + tone)
+          - optional prior history
+          - user prompt (question + operational stats block + retrieved IFU context)
+
+        Notes:
+          - stats_context is treated as operational/system information (NOT IFU evidence).
+          - retrieved IFU context remains the only source of clinical/IFU facts.
+        """
         tone_instruction = self.TONE_PRESETS.get(tone, self.TONE_PRESETS["neutral"])
 
         lang = (language or "en").strip().lower()
@@ -149,44 +159,68 @@ class IFUChatService:
             f"Do not switch languages unless the user asks."
         )
 
+        # --- System prompt (updated: includes language_instruction + tighter regulatory rules + more conversational style) ---
         system = (
-            "You are an assistant helping with medical device IFU content.\n"
-            "Use the provided CONTEXT as the authoritative source.\n"
-            "Do not invent facts. If the answer is not in the context, say so.\n"
-            "When you use facts from context, cite them using [#] indices.\n"
-            "Be helpful and conversational.\n"
-            "If needed, ask at most ONE clarifying question.\n"
-            "Formatting: prefer short paragraphs; use steps only if the user asks or it is clearly procedural.\n\n"
-            f"TONE:\n{tone_instruction}"
+            f"{language_instruction}\n\n"
+            "You are an assistant supporting questions about regulated medical device Instructions for Use (IFUs).\n\n"
+            "AUTHORITATIVE SOURCES:\n"
+            "- Use the provided CONTEXT as the authoritative source of factual IFU information.\n"
+            "- Do NOT invent facts or make assumptions.\n"
+            "- If the answer is not present in the context, clearly say what information is missing.\n\n"
+            "CITATION RULES:\n"
+            "- When you use facts from the retrieved IFU context, cite them using [#] indices.\n"
+            "- Do NOT cite operational or system statistics as IFU evidence.\n\n"
+            "STYLE & CONVERSATION:\n"
+            "- Be professional, clear, and approachable.\n"
+            "- Use natural language, not legal or robotic phrasing.\n"
+            "- Prefer short paragraphs.\n"
+            "- Use step-by-step formatting ONLY when the question is procedural.\n"
+            "- If the context partially answers the question, answer what you can and ask AT MOST ONE clarifying question.\n"
+            "- When appropriate, conclude with ONE short suggested next step.\n\n"
+            "REGULATORY SAFETY:\n"
+            "- Do not provide medical advice beyond the IFU.\n"
+            "- Do not speculate beyond the provided information.\n\n"
+            f"TONE GUIDANCE:\n{tone_instruction}"
         )
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
 
+        # --- Optional: include prior chat history ---
         for m in (history or []):
             role = (m.get("role") or "").strip()
             content = (m.get("content") or "").strip()
             if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": content})
 
+        # --- Stats block (updated: clearly marked as OPERATIONAL, not IFU) ---
         stats_block = ""
         if stats_context:
-            stats_block = f"SYSTEM STATE (authoritative; from /stats)\n{stats_context}\n\n"
+            stats_block = (
+                "OPERATIONAL CONTEXT (system statistics — NOT IFU content; do not cite as evidence):\n"
+                f"{stats_context}\n\n"
+            )
 
+        # --- User prompt (updated: simpler, more natural) ---
         user = (
-            "Please answer the question below using only the information provided in the context. "
-            "Do not quote the context verbatim.\n\n"
             f"Question:\n{question}\n\n"
-            f"Context:\n{stats_block}{context if context else '[no context retrieved]'}\n\n"
-            "Answer:"
+            f"{stats_block}"
+            "Retrieved context:\n"
+            f"{context if context else '[No relevant IFU content was retrieved]'}\n\n"
+            "Please respond according to the system instructions."
         )
 
         self.logger.debug(
-            "build_messages: stats_ctx_present=%s stats_len=%d",
+            "build_messages: lang=%s tone=%s history=%d ctx_chars=%d stats_present=%s stats_chars=%d",
+            lang,
+            tone,
+            len(history or []),
+            len(context or ""),
             bool(stats_context),
             len(stats_context or ""),
         )
 
         messages.append({"role": "user", "content": user})
         return messages
+
 
 
