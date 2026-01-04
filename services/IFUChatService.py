@@ -148,11 +148,12 @@ class IFUChatService:
 
         system = (
             "You are an assistant helping with medical device IFU content.\n"
-            "Answer ONLY using the provided context.\n"
-            "If the context does not contain the answer, say you don't have enough information and suggest what to check.\n"
+            "Use the provided CONTEXT as the authoritative source.\n"
+            "Do not invent facts. If the answer is not in the context, say so.\n"
             "When you use facts from context, cite them using [#] indices.\n"
-            "Formatting: default to 1–3 sentences unless the user asks for steps.\n\n"
-            f"LANGUAGE:\n{language_instruction}\n\n"
+            "Be helpful and conversational.\n"
+            "If needed, ask at most ONE clarifying question.\n"
+            "Formatting: prefer short paragraphs; use steps only if the user asks or it is clearly procedural.\n\n"
             f"TONE:\n{tone_instruction}"
         )
 

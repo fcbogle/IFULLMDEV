@@ -231,6 +231,8 @@ class IFUBlobService:
                 metadata = dict(default_metadata or {})
                 metadata.setdefault("source", "ui_upload")
                 metadata.setdefault("filename", filename)
+                metadata.setdefault("document_type", "IFU")
+
                 # optional: keep a trace of what the client claimed
                 if raw_ct:
                     metadata.setdefault("client_content_type", raw_ct)
