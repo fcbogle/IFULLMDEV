@@ -69,7 +69,7 @@ class IFUChatService:
             len(q),
             n_results,
             tone_key,
-            language,
+            lang,
             "yes" if where else "no",
             "yes" if stats_context else "no",
             len(stats_context or ""),

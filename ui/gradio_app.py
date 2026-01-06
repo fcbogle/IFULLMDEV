@@ -1008,13 +1008,27 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                 log_path = gr.Textbox(label="Log file path", value=LOG_FILE)
                 tail_lines = gr.Slider(50, 2000, value=LOG_TAIL_LINES, step=50, label="Tail lines")
                 refresh_logs_btn = gr.Button("Refresh logs")
-            log_view = gr.Textbox(label="Logs", value="", lines=25, interactive=False)
 
-            refresh_logs_btn.click(fn=tail_log_file, inputs=[log_path, tail_lines], outputs=[log_view])
+            log_view = gr.Textbox(
+                label="Logs",
+                value="",
+                lines=30,
+                interactive=False
+            )
+
+            refresh_logs_btn.click(
+                fn=tail_log_file,
+                inputs=[log_path, tail_lines],
+                outputs=[log_view]
+            )
 
             try:
                 timer = gr.Timer(value=3.0)
-                timer.tick(fn=tail_log_file, inputs=[log_path, tail_lines], outputs=[log_view])
+                timer.tick(
+                    fn=tail_log_file,
+                    inputs=[log_path, tail_lines],
+                    outputs=[log_view]
+                )
             except Exception:
                 pass
 

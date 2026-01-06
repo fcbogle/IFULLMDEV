@@ -131,8 +131,10 @@ def post_chat(
             max_tokens=req.max_tokens,
             history=req.history,
             tone=req.tone,
+            language=req.language,
             stats_context=stats_context,
         )
+        logger.info("POST /chat req: tone=%s language=%s", req.tone, req.language)
     except Exception as e:
         logger.exception("post_chat failed: %s", e)
         raise HTTPException(status_code=500, detail=f"chat failed: {e}")
