@@ -140,6 +140,8 @@ class IFUChatService:
             tone: str = "neutral",
             language: str = "en",
             stats_context: Optional[str] = None,
+            retrieved_sources: Optional[List[Dict[str, Any]]] = None,
+            allowed_docs: Optional[List[str]] = None,
     ) -> List[Dict[str, str]]:
         """
         Build OpenAI-style chat messages using:
@@ -154,69 +156,122 @@ class IFUChatService:
         tone_instruction = self.TONE_PRESETS.get(tone, self.TONE_PRESETS["neutral"])
 
         lang = (language or "en").strip().lower()
+        # --- Language instruction ---
         language_instruction = (
             f"Respond in {lang}. If the user writes in {lang}, keep the same language. "
             f"Do not switch languages unless the user asks."
         )
 
-        # --- System prompt (updated: includes language_instruction + tighter regulatory rules + more conversational style) ---
+        # --- OPTIONAL (recommended): build an explicit "RETRIEVED SOURCES" list + allowed docs ---
+        # Pass these in from your retrieval layer if you have them.
+        # retrieved_sources example item:
+        #   {"i": 1, "doc": "938327PK1 Iss2.pdf", "chunk_id": "c12", "page": 7, "section": "Warnings", "score": 0.18}
+        retrieved_sources = retrieved_sources or []  # ensure defined
+        allowed_docs = allowed_docs or []  # ensure defined
+
+        # If you have retrieved_sources, derive allowed_docs from them
+        if retrieved_sources and not allowed_docs:
+            allowed_docs = sorted({s.get("doc") for s in retrieved_sources if s.get("doc")})
+
+        allowed_docs_block = ""
+        if allowed_docs:
+            allowed_docs_block = (
+                    "ALLOWED DOCUMENTS (you may ONLY mention/cite these documents):\n"
+                    + "\n".join(f"- {d}" for d in allowed_docs)
+                    + "\n\n"
+            )
+
+        sources_text = ""
+        if retrieved_sources:
+            lines = ["RETRIEVED SOURCES (use these indices for citations like [#]):"]
+            for s in retrieved_sources:
+                i = s.get("i")
+                doc = s.get("doc", "Unknown document")
+                page = s.get("page")
+                section = s.get("section")
+                chunk_id = s.get("chunk_id")
+                score = s.get("score")
+
+                extras = []
+                if page is not None:
+                    extras.append(f"p.{page}")
+                if section:
+                    extras.append(f"{section}")
+                if chunk_id:
+                    extras.append(f"chunk:{chunk_id}")
+                if score is not None:
+                    extras.append(f"score:{score}")
+
+                suffix = f" ({', '.join(extras)})" if extras else ""
+                lines.append(f"[{i}] {doc}{suffix}")
+
+            sources_text = "\n".join(lines) + "\n\n"
+        else:
+            sources_text = "RETRIEVED SOURCES:\n[No sources available]\n\n"
+
+        # --- System prompt (UPDATED: strict grounding + doc control + citation gating) ---
         system = (
             f"{language_instruction}\n\n"
             "You are an assistant supporting questions about regulated medical device Instructions for Use (IFUs).\n\n"
-            "AUTHORITATIVE SOURCES:\n"
-            "- Use the provided CONTEXT as the authoritative source of factual IFU information.\n"
-            "- Do NOT invent facts or make assumptions.\n"
-            "- If the answer is not present in the context, clearly say what information is missing.\n\n"
-            "CITATION RULES:\n"
-            "- When you use facts from the retrieved IFU context, cite them using [#] indices.\n"
-            "- Do NOT cite operational or system statistics as IFU evidence.\n\n"
+            "GROUNDING (MOST IMPORTANT):\n"
+            "- Use ONLY the provided RETRIEVED IFU CONTEXT for factual claims about the IFU.\n"
+            "- If RETRIEVED IFU CONTEXT is empty or does not contain the answer, say: "
+            "\"I can't find that in the currently retrieved IFU content.\" Then state what is missing.\n"
+            "- Do NOT use prior chat history as a factual source.\n"
+            "- Do NOT infer or guess.\n\n"
+            "DOCUMENT CONTROL:\n"
+            "- You may ONLY mention or cite documents that appear in the RETRIEVED SOURCES list / ALLOWED DOCUMENTS.\n"
+            "- If a document is not in that list, do not reference it.\n\n"
+            "CITATIONS:\n"
+            "- Every factual statement must be supported by the retrieved context and MUST include a citation like [#].\n"
+            "- If you cannot provide a citation [#] for a factual claim, do not include that claim.\n"
+            "- Never cite OPERATIONAL CONTEXT as IFU evidence.\n\n"
+            "RETRIEVAL QUALITY CHECK:\n"
+            "- If the retrieved context is only loosely related, say so and ask AT MOST ONE clarifying question.\n"
+            "- If the user asks for a value (limits, warnings, contraindications), quote exact wording when available.\n\n"
+            "REGULATORY SAFETY:\n"
+            "- Do not provide medical advice beyond the IFU.\n"
+            "- Do not speculate beyond the provided IFU context.\n\n"
             "STYLE & CONVERSATION:\n"
             "- Be professional, clear, and approachable.\n"
-            "- Use natural language, not legal or robotic phrasing.\n"
             "- Prefer short paragraphs.\n"
             "- Use step-by-step formatting ONLY when the question is procedural.\n"
             "- If the context partially answers the question, answer what you can and ask AT MOST ONE clarifying question.\n"
             "- When appropriate, conclude with ONE short suggested next step.\n\n"
-            "REGULATORY SAFETY:\n"
-            "- Do not provide medical advice beyond the IFU.\n"
-            "- Do not speculate beyond the provided information.\n\n"
             f"TONE GUIDANCE:\n{tone_instruction}"
         )
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
 
         # --- Optional: include prior chat history ---
+        # NOTE: history can still help conversational continuity, but system prompt forbids using it as factual evidence.
         for m in (history or []):
             role = (m.get("role") or "").strip()
             content = (m.get("content") or "").strip()
             if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": content})
 
-        # --- Stats block (updated: clearly marked as OPERATIONAL, not IFU) ---
+        # --- Stats block (UPDATED: even stronger separation; placed AFTER retrieved context) ---
         stats_block = ""
         if stats_context:
             stats_block = (
-                "OPERATIONAL CONTEXT (system statistics — NOT IFU content; do not cite as evidence):\n"
-                f"{stats_context}\n\n"
+                "\n\nOPERATIONAL CONTEXT (system statistics — NOT IFU content):\n"
+                "- Use ONLY to explain system status (e.g., what is indexed).\n"
+                "- NEVER use as evidence for IFU facts.\n"
+                f"{stats_context}\n"
             )
 
-        # --- User prompt (updated: simpler, more natural) ---
+        # --- User prompt (UPDATED: sources + allowed docs + context-first ordering) ---
         user = (
             f"Question:\n{question}\n\n"
-            f"{stats_block}"
-            "Retrieved context:\n"
+            f"{allowed_docs_block}"
+            "RETRIEVED IFU CONTEXT:\n"
             f"{context if context else '[No relevant IFU content was retrieved]'}\n\n"
-            "Please respond according to the system instructions."
-        )
-
-        self.logger.debug(
-            "build_messages: lang=%s tone=%s history=%d ctx_chars=%d stats_present=%s stats_chars=%d",
-            lang,
-            tone,
-            len(history or []),
-            len(context or ""),
-            bool(stats_context),
-            len(stats_context or ""),
+            f"{sources_text}"
+            f"{stats_block}\n\n"
+            "Answer using ONLY the RETRIEVED IFU CONTEXT. "
+            "Cite sources as [#] for every factual claim. "
+            "If the answer is not present, say you cannot find it in the retrieved IFU content."
         )
 
         messages.append({"role": "user", "content": user})

@@ -38,6 +38,8 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+from typing import List
+
 def _run_ingest_job(
     *,
     job_id: str,
@@ -53,39 +55,89 @@ def _run_ingest_job(
       - In-memory job store only works reliably with a single uvicorn worker.
       - If you run multiple workers, move INGEST_JOBS to Redis/DB.
     """
+    logger.info("RUNNER INVOKED job_id=%s jobs_in_memory=%d", job_id, len(INGEST_JOBS))
+
     job = INGEST_JOBS.get(job_id)
     if not job:
         logger.warning("ingest job missing job_id='%s' (possibly restarted process)", job_id)
         return
 
+    logger.info("RUNNER STARTED job_id=%s requested=%d", job_id, len(doc_ids))
+
     job["status"] = "running"
     job["started_at"] = _utc_now()
     job["updated_at"] = _utc_now()
 
-    for doc_id in doc_ids:
-        job["items"][doc_id] = {"status": "running", "updated_at": _utc_now()}
+    try:
+        for doc_id in doc_ids:
+            job["items"][doc_id] = {"status": "running", "updated_at": _utc_now()}
+            job["updated_at"] = _utc_now()
 
-        try:
-            # Use existing synchronous service (kept unchanged)
-            svc.ingest_documents(container=container, doc_ids=[doc_id], document_type=document_type)
+            try:
+                out = svc.ingest_documents(
+                    container=container,
+                    doc_ids=[doc_id],
+                    document_type=document_type,
+                )
 
-            job["items"][doc_id] = {"status": "done", "updated_at": _utc_now()}
-            job["done"] += 1
+                ingested = int(out.get("ingested", 0) or 0)
+                rejected = int(out.get("rejected", 0) or 0)
+                errors = int(out.get("errors", 0) or 0)
 
-        except Exception as e:
-            job["items"][doc_id] = {
-                "status": "failed",
-                "error": str(e),
-                "updated_at": _utc_now(),
-            }
-            job["failed"] += 1
-            logger.exception("ingest job failed job_id='%s' doc_id='%s'", job_id, doc_id)
+                ok = (ingested > 0) and (errors == 0) and (rejected == 0)
 
+                if ok:
+                    job["items"][doc_id] = {
+                        "status": "done",
+                        "updated_at": _utc_now(),
+                        "result": out,
+                    }
+                    job["done"] = int(job.get("done", 0)) + 1
+                else:
+                    msg = None
+                    results = out.get("results") or []
+                    if isinstance(results, list) and results:
+                        first = results[0] or {}
+                        msg = first.get("message") or first.get("error") or first.get("detail")
+
+                    job["items"][doc_id] = {
+                        "status": "failed",
+                        "error": msg or f"ingested={ingested} rejected={rejected} errors={errors}",
+                        "updated_at": _utc_now(),
+                        "result": out,
+                    }
+                    job["failed"] = int(job.get("failed", 0)) + 1
+
+            except Exception as e:
+                job["items"][doc_id] = {
+                    "status": "failed",
+                    "error": str(e),
+                    "updated_at": _utc_now(),
+                }
+                job["failed"] = int(job.get("failed", 0)) + 1
+                logger.exception("ingest job failed job_id='%s' doc_id='%s'", job_id, doc_id)
+
+            job["updated_at"] = _utc_now()
+
+    except Exception:
+        # Catch anything unexpected outside per-doc logic
+        logger.exception("RUNNER CRASH job_id=%s", job_id)
+        job["failed"] = int(job.get("failed", 0)) + 1
+
+    finally:
+        # ✅ Always finalise so new jobs can start
+        job["status"] = "done_with_errors" if int(job.get("failed", 0)) else "done"
+        job["finished_at"] = _utc_now()
         job["updated_at"] = _utc_now()
 
-    job["status"] = "done_with_errors" if job["failed"] else "done"
-    job["finished_at"] = _utc_now()
-    job["updated_at"] = _utc_now()
+        logger.info(
+            "RUNNER FINISHED job_id=%s status=%s done=%d failed=%d",
+            job_id,
+            job["status"],
+            int(job.get("done", 0)),
+            int(job.get("failed", 0)),
+        )
+
 
 
 # -----------------------------------------------------------------------------
@@ -225,6 +277,17 @@ def post_ingest_documents(
     if not doc_ids:
         raise HTTPException(status_code=400, detail="doc_ids must not be empty")
 
+    # Guard against creating a new ingestion job i.e., Chroma/Embedder overload - low cost
+    for jid, job in INGEST_JOBS.items():
+        if job.get("status") in ("queued", "running"):
+            return {
+                "job_id": jid,
+                "status": job.get("status", "running"),
+                "requested": job.get("requested", 0),
+                "message": "An ingest job is already active; returning the existing job_id.",
+            }
+
+    # No active job -> create a new one
     job_id = str(uuid4())
     INGEST_JOBS[job_id] = {
         "job_id": job_id,
@@ -234,7 +297,7 @@ def post_ingest_documents(
         "requested": len(doc_ids),
         "done": 0,
         "failed": 0,
-        "items": {},  # doc_id -> {status, error?, updated_at}
+        "items": {},
         "created_at": _utc_now(),
         "started_at": None,
         "finished_at": None,
@@ -251,6 +314,7 @@ def post_ingest_documents(
     )
 
     return {"job_id": job_id, "status": "queued", "requested": len(doc_ids)}
+
 
 
 # -----------------------------------------------------------------------------

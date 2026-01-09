@@ -38,6 +38,10 @@ class Config:
     chroma_tenant: str
     chroma_database: str
 
+    # Chunking
+    ifu_chunk_size_tokens: int
+    ifu_overlap_tokens: int
+
     # ---- Single source of truth: field_name -> ENV VAR NAME ----
     ENV_VARS = {
         # IFU Sample PDF
@@ -63,6 +67,12 @@ class Config:
         "chroma_api_key": "CHROMA_API_KEY",
         "chroma_tenant": "CHROMA_TENANT",
         "chroma_database": "CHROMA_DATABASE",
+
+        # Chunking
+        "ifu_chunk_size_tokens": "IFU_CHUNK_SIZE_TOKENS",
+        "ifu_overlap_tokens": "IFU_OVERLAP_TOKENS",
+
+
     }
 
     # Convenient *groups* for use in tests / health checks
@@ -79,11 +89,23 @@ class Config:
 
     @staticmethod
     def from_env() -> "Config":
-        """Build Config object from environment variables."""
-        kwargs = {
-            field_name: os.getenv(env_name, "")
-            for field_name, env_name in Config.ENV_VARS.items()
-        }
+        """Build Config object from environment variables with proper typing."""
+        kwargs = {}
+
+        for field_name, env_name in Config.ENV_VARS.items():
+            raw = os.getenv(env_name)
+
+            # ---- typed fields ----
+            if field_name == "ifu_chunk_size_tokens":
+                kwargs[field_name] = int(raw) if raw else 1200
+
+            elif field_name == "ifu_overlap_tokens":
+                kwargs[field_name] = int(raw) if raw else 100
+
+            # ---- default: string fields ----
+            else:
+                kwargs[field_name] = raw or ""
+
         return Config(**kwargs)
 
     def __post_init__(self):

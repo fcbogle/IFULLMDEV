@@ -21,7 +21,7 @@ from utility.assets import img_to_data_uri
 API_BASE_URL = os.getenv("IFU_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 LOG_FILE = os.getenv("IFU_LOG_FILE", "./logs/ifullmdev.log")
 LOG_TAIL_LINES = int(os.getenv("IFU_UI_LOG_TAIL_LINES", "400"))
-TIMEOUT_SECONDS = int(os.getenv("IFU_UI_TIMEOUT_SECONDS", "30"))
+TIMEOUT_SECONDS = int(os.getenv("IFU_UI_TIMEOUT_SECONDS", "300"))
 
 DEFAULT_CONTAINER = os.getenv("IFU_DEFAULT_CONTAINER", "ifu-docs-test")
 
@@ -158,8 +158,19 @@ def ui_get_ingest_job(job_id: str) -> str:
     job_id = (job_id or "").strip()
     if not job_id:
         return json.dumps({"error": "job_id required"}, indent=2)
+
     out = _get(f"/documents/ingest/jobs/{job_id}")
+
+    status = (out.get("status") or "").strip().lower()
+    if status in ("queued", "running"):
+        out["ui_hint"] = "Job still running. Wait for status=done/done_with_errors before refreshing indexed documents."
+    elif status in ("done", "done_with_errors"):
+        out["ui_hint"] = "Job finished. You can now refresh Documents/Stats to see final indexed counts."
+    else:
+        out["ui_hint"] = "Unknown job status."
+
     return json.dumps(out, indent=2)
+
 
 
 # ---------------------------
@@ -179,7 +190,7 @@ def ui_upload_blobs(container: str, blob_prefix: str, files) -> str:
     blob_prefix = (blob_prefix or "").strip()
 
     if not files:
-        return json.dumps({"error": "No files selected"}, indent=2)
+        return "No files selected."
 
     if not isinstance(files, list):
         files = [files]
@@ -189,14 +200,12 @@ def ui_upload_blobs(container: str, blob_prefix: str, files) -> str:
         p = getattr(f, "name", None)
         if not p:
             continue
-
         ctype, _ = mimetypes.guess_type(p)
         ctype = ctype or "application/octet-stream"
-
         multipart.append(("files", (Path(p).name, open(p, "rb"), ctype)))
 
     if not multipart:
-        return json.dumps({"error": "No valid files found"}, indent=2)
+        return "No valid files found."
 
     try:
         r = requests.post(
@@ -205,15 +214,51 @@ def ui_upload_blobs(container: str, blob_prefix: str, files) -> str:
             files=multipart,
             timeout=TIMEOUT_SECONDS,
         )
+
         if not r.ok:
-            return json.dumps(
-                {"error": "upload failed", "status_code": r.status_code, "response": r.text},
-                indent=2,
+            return (
+                "Upload failed.\n\n"
+                f"Status code: {r.status_code}\n"
+                f"Response: {r.text}"
             )
-        return json.dumps(r.json(), indent=2)
+
+        payload = r.json()
+        results = payload.get("results", []) or []
+
+        uploaded_n = payload.get("uploaded", 0)
+        errors_n = payload.get("errors", 0)
+        rejected_n = payload.get("rejected", None)
+
+        summary = f"Uploaded: {uploaded_n} | Errors: {errors_n}"
+        if rejected_n is not None:
+            summary = f"Uploaded: {uploaded_n} | Rejected: {rejected_n} | Errors: {errors_n}"
+
+        lines = [f"**{summary}**", ""]
+
+        for item in results:
+            filename = item.get("filename") or item.get("blob_name") or "<unknown>"
+
+            if item.get("ok") is True:
+                ct = item.get("content_type")
+                sz = item.get("bytes")
+
+                suffix_parts = []
+                if ct:
+                    suffix_parts.append(ct)
+                if isinstance(sz, int):
+                    suffix_parts.append(f"{sz} bytes")
+
+                suffix = f" ({', '.join(suffix_parts)})" if suffix_parts else ""
+                lines.append(f"Uploaded : `{filename}`{suffix}")
+
+            else:
+                details = item.get("error") or item.get("message") or "Upload rejected or not supported."
+                lines.append(f"Rejected : `{filename}`\n   {details}")
+
+        return "\n".join(lines)
 
     except Exception as e:
-        return json.dumps({"error": f"upload failed: {e}"}, indent=2)
+        return f"Upload failed: {e}"
 
     finally:
         for _, (_, fh, _) in multipart:
@@ -221,7 +266,6 @@ def ui_upload_blobs(container: str, blob_prefix: str, files) -> str:
                 fh.close()
             except Exception:
                 pass
-
 
 def ui_delete_blob(container: str, blob_name: str) -> str:
     container = (container or "").strip() or DEFAULT_CONTAINER
@@ -485,9 +529,9 @@ def ui_reindex(container: str, doc_id: str, document_type: str) -> str:
         return json.dumps({"error": f"reindex failed: {e}"}, indent=2)
 
 
-def ui_ingest(container: str, doc_ids_text: str, document_type: str) -> str:
+def ui_ingest(container: str, doc_ids_text: str, document_type: str):
     """
-    Bulk ingest now returns 202 with a job_id (queued), not a completed ingested count.
+    Bulk ingest returns 202 with a job_id (queued), not a completed ingested count.
     """
     container = (container or "").strip() or DEFAULT_CONTAINER
     document_type = (document_type or "IFU").strip() or "IFU"
@@ -495,9 +539,32 @@ def ui_ingest(container: str, doc_ids_text: str, document_type: str) -> str:
     raw_ids = (doc_ids_text or "").replace(",", "\n").splitlines()
     doc_ids = [x.strip() for x in raw_ids if x.strip()]
 
+    if not doc_ids:
+        return "No doc_ids provided."
+
     payload = {"container": container, "doc_ids": doc_ids, "document_type": document_type}
-    out = _post("/documents/ingest", payload=payload)
-    return json.dumps(out, indent=2)
+
+    try:
+        out = _post("/documents/ingest", payload=payload)
+
+        job_id = out.get("job_id")
+        status = out.get("status", "queued")
+        submitted = out.get("submitted", len(doc_ids))
+
+        lines = [
+            "### Ingest queued",
+            f"- **Status:** `{status}`",
+            f"- **Job ID:** `{job_id}`" if job_id else "- **Job ID:** *(not returned)*",
+            f"- **Container:** `{container}`",
+            f"- **Document type:** `{document_type}`",
+            f"- **Documents submitted:** **{submitted}**",
+            "",
+            "This runs in the background. Check logs (or a job status endpoint, if enabled) for progress.",
+        ]
+        return "\n".join(lines), job_id
+
+    except Exception as e:
+        return f"Failed to queue ingest job: {e}"
 
 
 def ui_ingest_one(container: str, doc_id: str, document_type: str) -> str:
@@ -511,14 +578,32 @@ def ui_ingest_one(container: str, doc_id: str, document_type: str) -> str:
     document_type = (document_type or "IFU").strip() or "IFU"
 
     if not doc_id:
-        return json.dumps({"error": "doc_id required"}, indent=2)
+        return "doc_id required."
 
-    out = _post(
-        f"/documents/{doc_id}/ingest",
-        payload={},
-        params={"container": container, "document_type": document_type},
-    )
-    return json.dumps(out, indent=2)
+    try:
+        out = _post(
+            f"/documents/{doc_id}/ingest",
+            payload={},
+            params={"container": container, "document_type": document_type},
+        )
+
+        job_id = out.get("job_id")
+        status = out.get("status", "queued")
+
+        lines = [
+            "###Ingest queued",
+            f"- **Status:** `{status}`",
+            f"- **Job ID:** `{job_id}`" if job_id else "- **Job ID:** *(not returned)*",
+            f"- **Container:** `{container}`",
+            f"- **Document type:** `{document_type}`",
+            f"- **doc_id:** `{doc_id}`",
+            "",
+            "This runs in the background. Check logs (or a job status endpoint, if enabled) for progress.",
+        ]
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Failed to queue ingest for `{doc_id}`: {e}"
 
 
 def ui_delete_vectors(doc_id: str) -> str:
@@ -836,10 +921,11 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                 selected = selected or []
                 return "\n".join(selected)
 
-            def _ingest_bulk_from_ui(c: str, selected, typed: str, doc_type: str) -> str:
+            def _ingest_bulk_from_ui(c: str, selected, typed: str, doc_type: str):
                 selected = selected or []
                 doc_ids_text = "\n".join(selected) if selected else (typed or "")
-                return ui_ingest(c, doc_ids_text, doc_type)  # should return JSON string incl job_id
+                # ui_ingest now returns (message, job_id)
+                return ui_ingest(c, doc_ids_text, doc_type)
 
             # -------------
             # Event wiring
@@ -876,11 +962,7 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
             ingest_btn.click(
                 fn=_ingest_bulk_from_ui,
                 inputs=[container, ingest_select, ingest_ids, document_type],
-                outputs=[ingest_out],
-            ).then(
-                fn=_extract_job_id,
-                inputs=[ingest_out],
-                outputs=[ingest_job_id],
+                outputs=[ingest_out, ingest_job_id],
             )
 
             # Bulk poll

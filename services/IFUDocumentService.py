@@ -218,20 +218,46 @@ class IFUDocumentService:
         except Exception as e:
             self.logger.error("upload_documents: container='%s' blob_prefix='%s' -> failed: %s", container, blob_prefix, e, exc_info=True)
 
-    def ingest_documents(self, *, container: str, doc_ids: list[str], document_type: str = "IFU", ) -> int:
-        self.logger.info("ingest_documents: container='%s' document_type='%s' doc_ids=%d (start)", container, doc_ids, len(doc_ids),)
+    from typing import Any, Dict
+
+    def ingest_documents(
+            self,
+            *,
+            container: str,
+            doc_ids: list[str],
+            document_type: str = "IFU",
+    ) -> Dict[str, Any]:
+        self.logger.info(
+            "ingest_documents: container='%s' document_type='%s' doc_ids=%d (start)",
+            container, document_type, len(doc_ids),
+        )
 
         if not doc_ids:
-            self.logger.warning("ingest_documents: container='%s' document_type='%s' requested=%d ingested=%d (done)", container, doc_ids)
-            return 0
+            return {
+                "container": container,
+                "document_type": document_type,
+                "attempted": 0,
+                "ingested": 0,
+                "rejected": 0,
+                "errors": 0,
+                "results": [],
+            }
 
-        try:
-            ingested = self.ingest_service.ingest_blob_pdfs(container=container, blob_names=doc_ids, document_type=document_type,)
-            self.logger.info("ingest_documents: container='%s' document_type='%s' ingested=%d (done)", container, doc_ids, ingested,)
-            return ingested
-        except Exception as e:
-            self.logger.error("ingest_documents: container='%s' document_type='%s' doc_ids=%s -> failed: %s", container, doc_ids, document_type, e, exc_info=True)
-            raise
+        out = self.ingest_service.ingest_blob_pdfs(
+            blob_names=doc_ids,
+            container=container,
+            document_type=document_type,
+        )
+
+        self.logger.info(
+            "ingest_documents: container='%s' document_type='%s' attempted=%d ingested=%d rejected=%d errors=%d (done)",
+            container, document_type,
+            out.get("attempted", len(doc_ids)),
+            out.get("ingested", 0),
+            out.get("rejected", 0),
+            out.get("errors", 0),
+        )
+        return out
 
     def reindex_document(self,
                          *,

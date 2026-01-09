@@ -197,12 +197,37 @@ class IFUBlobService:
         results: List[Dict[str, Any]] = []
         uploaded = 0
         errors = 0
+        rejected = 0
 
         for f in files:
             filename = (f.filename or "").strip() or "upload.bin"
             blob_name = f"{blob_prefix}{filename}" if blob_prefix else filename
 
             try:
+                ext = ""
+                if "." in filename:
+                    allowed_extensions = {".pdf"}  # later: {".pdf", ".txt"}
+
+                    ext = ""
+                    if "." in filename:
+                        ext = "." + filename.lower().rsplit(".", 1)[-1]
+
+                    if ext not in allowed_extensions:
+                        rejected += 1
+                        msg = (
+                            f"Rejected '{filename}'. "
+                            f"Unsupported file type '{ext or '(none)'}'. "
+                            f"Allowed types: {', '.join(sorted(allowed_extensions))}"
+                        )
+                        self.logger.warning("upload_files: %s", msg)
+                        results.append({
+                            "filename": filename,
+                            "blob_name": blob_name,
+                            "ok": False,
+                            "error": msg,
+                        })
+                        continue
+
                 data = await f.read()
                 size = len(data) if data else 0
 
@@ -211,7 +236,6 @@ class IFUBlobService:
                 guessed_ct = (guessed_ct or "").strip().lower()
 
                 # --- choose final content type ---
-                ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
                 is_pdf_name = filename.lower().endswith(".pdf")
 
                 # raw_ct is often wrong; override when it contradicts filename/guess
@@ -274,6 +298,7 @@ class IFUBlobService:
             "container": container,
             "blob_prefix": blob_prefix,
             "uploaded": uploaded,
+            "rejected": rejected,
             "errors": errors,
             "results": results,
         }

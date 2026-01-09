@@ -6,17 +6,19 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List
 
+from config.Config import Config
 from chunking.IFUChunker import IFUChunker
 from chunking.LangDetectDetector import LangDetectDetector
-from extractor.IFUTextExtractor import IFUTextExtractor
 from embedding.IFUEmbedder import IFUEmbedder
+from extractor.IFUTextExtractor import IFUTextExtractor
+from loader.IFUDocumentLoader import IFUDocumentLoader
 from utility.logging_utils import get_class_logger
 from vectorstore.IFUVectorStore import IFUVectorStore
-from loader.IFUDocumentLoader import IFUDocumentLoader
 
 
 class IFUIngestService:
@@ -30,15 +32,15 @@ class IFUIngestService:
     """
 
     def __init__(
-        self,
-        *,
-        document_loader: IFUDocumentLoader,
-        store: IFUVectorStore,
-        embedder: IFUEmbedder,
-        chunker: IFUChunker,
-        extractor: IFUTextExtractor,
-        collection_name: str,
-        logger: logging.Logger | None = None,
+            self,
+            *,
+            document_loader: IFUDocumentLoader,
+            store: IFUVectorStore,
+            embedder: IFUEmbedder,
+            chunker: IFUChunker,
+            extractor: IFUTextExtractor,
+            collection_name: str,
+            logger: logging.Logger | None = None,
     ) -> None:
         self.document_loader = document_loader
         self.store = store
@@ -50,55 +52,120 @@ class IFUIngestService:
 
     @staticmethod
     def build_default_chunker(
-        *,
-        lang_detector: Any | None = None,
-        chunk_size_tokens: int = 300,
-        overlap_tokens: int = 100,
+            *,
+            lang_detector: Any | None = None,
+            cfg: Config | None = None,
     ) -> IFUChunker:
         tokenizer = lambda text: re.findall(r"\w+|\S", text)
         detector = lang_detector or LangDetectDetector()
+
+        cfg = cfg or Config.from_env()
+
         return IFUChunker(
             tokenizer=tokenizer,
             lang_detector=detector,
-            chunk_size_tokens=chunk_size_tokens,
-            overlap_tokens=overlap_tokens,
+            cfg=cfg,
         )
 
+    from typing import Any, Dict, Iterable, Optional
+
     def ingest_blob_pdfs(
-        self,
-        blob_names: Iterable[str],
-        *,
-        container: str,
-        document_type: str = "IFU",
-    ) -> int:
-        ingested_count = 0
+            self,
+            blob_names: Iterable[str],
+            *,
+            container: str,
+            document_type: str = "IFU",
+    ) -> Dict[str, Any]:
         blob_list = list(blob_names)
 
+        ingested = 0
+        rejected = 0
+        errors = 0
+
+        results: List[Dict[str, Any]] = []
+
         for blob_name in blob_list:
+            ext = os.path.splitext(blob_name.lower())[1]
+
+            # --- policy gate: only PDFs for now ---
+            if ext != ".pdf":
+                rejected += 1
+                results.append({
+                    "blob_name": blob_name,
+                    "ok": False,
+                    "status": "rejected",
+                    "message": (
+                        f"Uploading/ingesting '{ext or '(none)'}' is not supported yet. "
+                        f"Please upload PDF files only."
+                    ),
+                })
+                continue
+
             try:
+                # (Optional but recommended) download bytes once so we can sanity-check header
+                pdf_bytes = self.document_loader.load_blob_bytes(container=container, blob_name=blob_name)
+
+                if not pdf_bytes or not pdf_bytes.lstrip().startswith(b"%PDF"):
+                    errors += 1
+                    msg = "File does not look like a valid PDF (missing %PDF header)."
+                    self.logger.warning("Skipping blob '%s': %s", blob_name, msg)
+                    results.append({
+                        "blob_name": blob_name,
+                        "ok": False,
+                        "status": "error",
+                        "message": msg,
+                    })
+                    continue
+
+                # Process using existing pipeline; tweak _process_single_blob_pdf to accept bytes
                 self._process_single_blob_pdf(
                     container=container,
                     blob_name=blob_name,
                     document_type=document_type,
+                    pdf_bytes=pdf_bytes,
                 )
-                ingested_count += 1
+
+                ingested += 1
+                results.append({
+                    "blob_name": blob_name,
+                    "ok": True,
+                    "status": "ingested",
+                })
+
             except Exception as e:
+                errors += 1
                 self.logger.error("Failed ingest for blob '%s': %s", blob_name, e, exc_info=True)
+                results.append({
+                    "blob_name": blob_name,
+                    "ok": False,
+                    "status": "error",
+                    "message": str(e),
+                })
+
+        out = {
+            "container": container,
+            "document_type": document_type,
+            "attempted": len(blob_list),
+            "ingested": ingested,
+            "rejected": rejected,
+            "errors": errors,
+            "results": results,
+        }
 
         self.logger.info(
-            "Blob ingest complete: %d/%d blobs successfully indexed",
-            ingested_count,
-            len(blob_list),
+            "Blob ingest complete: ingested=%d rejected=%d errors=%d attempted=%d",
+            ingested, rejected, errors, len(blob_list),
         )
-        return ingested_count
+        return out
 
     def _process_single_blob_pdf(
-        self,
-        *,
-        container: str,
-        blob_name: str,
-        document_type: str,
-        source_path: Optional[Path] = None,
+            self,
+            *,
+            container: str,
+            blob_name: str,
+            document_type: str,
+            pdf_bytes: Optional[bytes] = None,
+            source_path: Optional[Path] = None,
     ) -> None:
         self.logger.info(
             "Processing blob '%s' from container '%s' into collection '%s'",
@@ -107,8 +174,15 @@ class IFUIngestService:
             self.collection_name,
         )
 
-        pdf_bytes = self.document_loader.load_blob_bytes(container=container, blob_name=blob_name)
+        # Only download if caller didn’t supply bytes
+        if pdf_bytes is None:
+            pdf_bytes = self.document_loader.load_blob_bytes(container=container, blob_name=blob_name)
 
+        # Defensive sanity check to avoid deep PyMuPDF errors
+        if not pdf_bytes or not pdf_bytes.lstrip().startswith(b"%PDF"):
+            raise ValueError(f"Blob '{blob_name}' does not appear to be a valid PDF (missing %PDF header).")
+
+        # Continue with your existing extraction/chunk/embed/index pipeline...
         raw = self.extractor.extract_text_from_pdf(pdf_bytes)
 
         # Normalise -> pages: List[str]

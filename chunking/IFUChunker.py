@@ -8,6 +8,7 @@ import uuid
 from typing import List, Callable, Dict, Any, Optional, Tuple
 from collections import Counter
 
+from config.Config import Config
 from chunking.IFUChunk import IFUChunk
 from utility.logging_utils import get_class_logger
 
@@ -23,17 +24,28 @@ class IFUChunker:
         tokenizer: Callable[[str], List[str]],
         lang_detector,
         *,
-        chunk_size_tokens: int = 300,
-        overlap_tokens: int = 100,
+        cfg: Config | None = None,
         page_fallback_threshold: float = 0.65,
         logger: logging.Logger | None = None,
     ):
         self.tokenizer = tokenizer
         self.lang_detector = lang_detector
-        self.chunk_size_tokens = chunk_size_tokens
-        self.overlap_tokens = overlap_tokens
+
         self.page_fallback_threshold = page_fallback_threshold
         self.logger = logger or get_class_logger(self.__class__)
+
+        # defaults (used if cfg is None)
+        chunk_size_tokens = 300
+        overlap_tokens = 100
+
+        # override from config if provided
+        if cfg is not None:
+            chunk_size_tokens = cfg.ifu_chunk_size_tokens
+            overlap_tokens = cfg.ifu_overlap_tokens
+
+        # persist onto the instance
+        self.chunk_size_tokens = int(chunk_size_tokens)
+        self.overlap_tokens = int(overlap_tokens)
 
         # guard against bad config that can cause infinite loops
         if self.overlap_tokens >= self.chunk_size_tokens:
@@ -77,7 +89,7 @@ class IFUChunker:
             page_count = len(pages)
             base_metadata["page_count"] = page_count
 
-        # Ensure document_type and last_modifiled are included in metadata
+        # Ensure document_type and last_modified are included in metadata
         doc_type = base_metadata.get("document_type")
         if not isinstance(doc_type, str) or not doc_type.strip():
             base_metadata["document_type"] = "unknown"

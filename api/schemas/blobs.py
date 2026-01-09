@@ -51,9 +51,31 @@ class SetBlobMetadataResponse(BaseModel):
 class UploadBlobsResponseItem(BaseModel):
     filename: str
     blob_name: str
+    ok: bool
+
+    # present on success
+    bytes: Optional[int] = None
+    content_type: Optional[str] = None
+
+    # present on reject/error
+    error: Optional[str] = None
+    rejected: Optional[str] = None
+    message: Optional[str] = None
+    status: Optional[str] = None
+
+    class Config:
+        extra = "allow"
 
 
 class UploadBlobsResponse(BaseModel):
     container: str
+    blob_prefix: str = ""
     uploaded: int
+    errors: int = 0
     results: List[UploadBlobsResponseItem]
+
+    # optional if you decide to track it explicitly
+    rejected: Optional[int] = None
+
+    class Config:
+        extra = "allow"
