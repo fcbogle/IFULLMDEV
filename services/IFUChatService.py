@@ -1,4 +1,9 @@
-# services/IFUChatService.py
+# -----------------------------------------------------------------------------
+# Author: Frank Campbell Bogle
+# Created: 2025-12-21
+# Description: IFUStatsService.py
+# -----------------------------------------------------------------------------
+
 from __future__ import annotations
 
 from dataclasses import dataclass

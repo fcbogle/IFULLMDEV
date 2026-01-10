@@ -4,84 +4,110 @@
 # Description: IFUStatsService.py
 # -----------------------------------------------------------------------------
 
-import logging
-from typing import Any, Dict, List
+from collections import Counter, defaultdict
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-from loader.IFUDocumentLoader import IFUDocumentLoader
-from loader.types import IFUStatsDict, DocumentEntry, BlobEntry
-
-from utility.logging_utils import get_class_logger
-from vectorstore.IFUVectorStore import IFUVectorStore
+from api.schemas.ifu_stats import IFUStatsResponse, DocumentStats, BlobStats
+from settings import ACTIVE_CORPUS_ID
 
 
 class IFUStatsService:
-    """
-    Stats service for the /stats endpoint.
-
-    Responsibilities:
-      - query Chroma for doc + chunk stats
-      - query blob storage for blob list
-      - return response matching IFUStatsResponse schema (incl total_documents)
-    """
-
-    def __init__(
-        self,
-        *,
-        document_loader: IFUDocumentLoader,
-        store: IFUVectorStore,
-        collection_name: str,
-        logger: logging.Logger | None = None,
-    ) -> None:
+    def __init__(self, *, vector_store, document_loader, collection_name: str):
+        self.vector_store = vector_store
         self.document_loader = document_loader
-        self.store = store
         self.collection_name = collection_name
-        self.logger = logger or get_class_logger(self.__class__)
 
-    def get_stats(self, *, blob_container: str) -> IFUStatsDict:
-        self.logger.info(
-            "Stats for collection='%s', blob_container='%s'",
-            self.collection_name,
-            blob_container,
-        )
+    def _get_metadatas_for(self, *, blob_container: str, corpus_id: str) -> List[Dict[str, Any]]:
+        where = {"$and": [{"corpus_id": corpus_id}, {"container": blob_container}]}
 
-        # --- Chroma / embeddings ---
         try:
-            total_chunks = self.store.collection.count()
-        except Exception as e:
-            self.logger.error("Failed to count Chroma collection '%s': %s", self.collection_name, e)
-            total_chunks = 0
+            res = self.vector_store.collection.get(where=where, include=["metadatas"])
+            return res.get("metadatas") or []
+        except (TypeError, ValueError):
+            # Fallback: fetch all metadatas and filter locally
+            res = self.vector_store.collection.get(include=["metadatas"])
+            metadatas = res.get("metadatas") or []
+            return [
+                m for m in metadatas
+                if (m.get("corpus_id") == corpus_id and m.get("container") == blob_container)
+            ]
 
-        docs_raw = self.store.list_documents()
+    def get_stats(self, *, blob_container: str, corpus_id: Optional[str] = None) -> IFUStatsResponse:
+        corpus = corpus_id or ACTIVE_CORPUS_ID
 
-        documents: List[DocumentEntry] = []
-        for d in docs_raw:
-            if not isinstance(d, dict):
-                continue
+        # --- 1) Chroma stats (corpus-aware) ---
+        metadatas = self._get_metadatas_for(blob_container=blob_container, corpus_id=corpus)
+        total_chunks = len(metadatas)
 
-            doc_id = d.get("doc_id")
-            chunk_count = d.get("chunk_count")
-            page_count = d.get("page_count")
-            last_modified = d.get("last_modified")
-            document_type = d.get("document_type")
+        # Group by doc_id
+        doc_chunk_counts: Dict[str, int] = defaultdict(int)
+        doc_page_count: Dict[str, Optional[int]] = {}
+        doc_last_modified: Dict[str, Optional[datetime]] = {}
+        doc_type: Dict[str, Optional[str]] = {}
+        doc_name: Dict[str, Optional[str]] = {}
+        lang_counts_by_doc = defaultdict(Counter)
 
-            if isinstance(doc_id, str) and isinstance(chunk_count, int):
-                documents.append(
-                    DocumentEntry(
-                        doc_id=doc_id,
-                        chunk_count=chunk_count,
-                        page_count=page_count if page_count is not None else None,
-                        last_modified=last_modified if isinstance(last_modified, str) else None,
-                        document_type=document_type if isinstance(document_type, str) else None,
-                    )
+        for m in metadatas:
+            doc_id = m.get("doc_id") or "UNKNOWN_DOC_ID"
+            doc_chunk_counts[doc_id] += 1
+
+            # prefer doc_name/file_name/source for display
+            dn = m.get("doc_name") or m.get("file_name") or m.get("source") or doc_id
+            doc_name.setdefault(doc_id, dn)
+
+            # page_count (doc-level metadata you already attach)
+            if doc_id not in doc_page_count:
+                pc = m.get("page_count")
+                doc_page_count[doc_id] = int(pc) if isinstance(pc, (int, float)) else None
+
+            # document_type
+            if doc_id not in doc_type:
+                dt = m.get("document_type")
+                doc_type[doc_id] = str(dt) if dt is not None else None
+
+            # last_modified (stored as ISO string in your metadata)
+            if doc_id not in doc_last_modified:
+                lm = m.get("last_modified")
+                if isinstance(lm, str) and lm.strip():
+                    try:
+                        doc_last_modified[doc_id] = datetime.fromisoformat(lm.replace("Z", "+00:00"))
+                    except Exception:
+                        doc_last_modified[doc_id] = None
+                else:
+                    doc_last_modified[doc_id] = None
+
+            # languages per doc
+            lang = m.get("lang") or "und"
+            lang_counts_by_doc[doc_id][lang] += 1
+
+        documents: List[DocumentStats] = []
+        for doc_id, cnt in doc_chunk_counts.items():
+            lc = dict(lang_counts_by_doc[doc_id])
+            primary_lang = max(lc, key=lc.get) if lc else None
+
+            documents.append(
+                DocumentStats(
+                    doc_id=doc_id,
+                    doc_name=doc_name.get(doc_id),
+                    chunk_count=cnt,
+                    page_count=doc_page_count.get(doc_id),
+                    last_modified=doc_last_modified.get(doc_id),
+                    document_type=doc_type.get(doc_id),
+                    primary_lang=primary_lang,
+                    lang_counts=lc or None,
                 )
+            )
 
-        # --- Blob side ---
-        blob_details = self.document_loader.get_blob_details(container=blob_container)
+        documents.sort(key=lambda d: d.chunk_count, reverse=True)
 
-        blobs: List[BlobEntry] = []
-        for b in blob_details:
+        # --- 2) Blob stats (from Azure) ---
+        blob_rows = self.document_loader.get_blob_details(container=blob_container)
+
+        blobs: List[BlobStats] = []
+        for b in blob_rows:
             blobs.append(
-                BlobEntry(
+                BlobStats(
                     blob_name=b.get("blob_name"),
                     size=b.get("size"),
                     content_type=b.get("content_type"),
@@ -91,17 +117,13 @@ class IFUStatsService:
 
         total_blobs = len(blobs)
 
-        # FIX: include total_documents to satisfy IFUStatsResponse
-        total_documents = len(documents) if documents else len(blobs)
-
-        return IFUStatsDict(
+        return IFUStatsResponse(
             collection_name=self.collection_name,
+            corpus_id=corpus,
             total_chunks=total_chunks,
-            total_documents=total_documents,
-            total_blobs=total_blobs,
+            total_documents=len(documents),
             documents=documents,
             blob_container=blob_container,
+            total_blobs=total_blobs,
             blobs=blobs,
         )
-
-

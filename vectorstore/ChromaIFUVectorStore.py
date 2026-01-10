@@ -149,7 +149,6 @@ class ChromaIFUVectorStore(IFUVectorStore):
             where: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
 
-        # High-level log for pipeline visibility
         self.logger.info(
             "Querying Chroma collection '%s' with query=%r (n_results=%d, where=%s)",
             self.collection_name,
@@ -159,35 +158,33 @@ class ChromaIFUVectorStore(IFUVectorStore):
         )
 
         try:
-            # 1) Embed query text
             self.logger.debug("Embedding query text using embedder=%r", self.embedder)
-            query_vectors = self.embedder.embed_texts([query_text])  # List[List[float]]
-            self.logger.debug(
-                "Query embedding generated: vector_length=%d",
-                len(query_vectors[0]) if query_vectors else -1,
-            )
+            query_vectors = self.embedder.embed_texts([query_text])
 
-            # 2) Build and merge Chroma query parameters
             query_kwargs: Dict[str, Any] = {
                 "query_embeddings": query_vectors,
                 "n_results": n_results,
                 "include": ["documents", "metadatas", "distances"],
             }
 
-            # Enforce corpus scoping (server-side safety)
-            merged_where: Dict[str, Any] = dict(where or {})
+            def _as_chroma_where(filters: Dict[str, Any]) -> Dict[str, Any]:
+                if not filters:
+                    return {}
+                if len(filters) == 1:
+                    return filters
+                return {"$and": [{k: v} for k, v in filters.items()]}
+
+            merged_where = dict(where or {})
             merged_where.setdefault("corpus_id", ACTIVE_CORPUS_ID)
 
-            # Only attach where if it has something in it
-            if merged_where:
-                self.logger.debug("Applying metadata filter (where=%s)", merged_where)
-                query_kwargs["where"] = merged_where
+            chroma_where = _as_chroma_where(merged_where)
+            if chroma_where:
+                self.logger.debug("Applying metadata filter (where=%s)", chroma_where)
+                query_kwargs["where"] = chroma_where
 
-            # 3) Execute Chroma query
             self.logger.debug("Issuing Chroma query against collection '%s'", self.collection_name)
             res = self.collection.query(**query_kwargs)
 
-            # Log summary of results
             ids = res.get("ids") or [[]]
             returned = len(ids[0]) if ids and isinstance(ids[0], list) else len(ids)
             self.logger.info(
@@ -195,19 +192,12 @@ class ChromaIFUVectorStore(IFUVectorStore):
                 returned,
                 n_results,
             )
-            self.logger.debug(
-                "Chroma result keys: %s",
-                list(res.keys())
-            )
+            self.logger.debug("Chroma result keys: %s", list(res.keys()))
 
             return res
 
         except Exception as e:
-            self.logger.error(
-                "Error during query_text execution: %s",
-                str(e),
-                exc_info=True
-            )
+            self.logger.error("Error during query_text execution: %s", str(e), exc_info=True)
             raise
 
     @staticmethod

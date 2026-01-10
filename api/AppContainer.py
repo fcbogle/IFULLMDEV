@@ -4,11 +4,12 @@
 # Description: AppContainer.py
 # -----------------------------------------------------------------------------
 from chat.OpenAIChat import OpenAIChat
-from config.Config import Config
-
 from chunking.LangDetectDetector import LangDetectDetector
+from config.Config import Config
 from embedding.IFUEmbedder import IFUEmbedder
 from extractor.IFUTextExtractor import IFUTextExtractor
+from health.TestRunner import TestRunner
+from loader.IFUDocumentLoader import IFUDocumentLoader
 from services.IFUBlobService import IFUBlobService
 from services.IFUChatService import IFUChatService
 from services.IFUDocumentService import IFUDocumentService
@@ -16,8 +17,6 @@ from services.IFUHealthService import IFUHealthService
 from services.IFUIngestService import IFUIngestService
 from services.IFUQueryService import IFUQueryService
 from services.IFUStatsService import IFUStatsService
-from health.TestRunner import TestRunner
-from loader.IFUDocumentLoader import IFUDocumentLoader
 from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
 
 
@@ -30,6 +29,8 @@ class AppContainer:
     def __init__(self) -> None:
         # Configuration
         self.cfg = Config.from_env()
+
+        self.collection_name = "ifu-docs-test"
 
         # Smoke tests / health
         self.test_runner = TestRunner(cfg=self.cfg)
@@ -61,9 +62,9 @@ class AppContainer:
 
         # Return a singleton IFUStatsService instance
         self.stats_service = IFUStatsService(
+            vector_store=self.store,  # ✅ rename kwarg
             document_loader=self.document_loader,
-            store=self.store,
-            collection_name="ifu-docs-test",
+            collection_name=self.collection_name,
         )
 
         # Return a singleton IFUQueryService instance
@@ -92,6 +93,6 @@ class AppContainer:
             file_loader=self.document_loader.file_loader
         )
 
+
 # Singleton container instance
 app_container = AppContainer()
-
