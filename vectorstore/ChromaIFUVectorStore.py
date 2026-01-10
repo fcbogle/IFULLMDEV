@@ -17,6 +17,8 @@ from embedding.IFUEmbedder import EmbeddingRecord, IFUEmbedder
 from utility.logging_utils import get_class_logger
 from vectorstore.IFUVectorStore import IFUVectorStore
 
+from settings import ACTIVE_CORPUS_ID
+
 
 @dataclass(kw_only=True)
 class ChromaIFUVectorStore(IFUVectorStore):
@@ -66,6 +68,8 @@ class ChromaIFUVectorStore(IFUVectorStore):
             doc_id: str,
             chunks: Sequence[IFUChunk],
             records: Sequence[EmbeddingRecord],
+            *,
+            corpus_id: str
     ) -> None:
         if len(chunks) != len(records):
             raise ValueError(
@@ -92,13 +96,29 @@ class ChromaIFUVectorStore(IFUVectorStore):
             meta: Dict[str, Any] = dict(getattr(rec, "metadata", {}) or {})
 
             # Fill required/standard fields if missing
-            meta.setdefault("doc_id", doc_id)
-            meta.setdefault("doc_name", getattr(chunk, "doc_name", None))
-            meta.setdefault("page_start", getattr(chunk, "page_start", None))
-            meta.setdefault("page_end", getattr(chunk, "page_end", None))
-            meta.setdefault("lang", getattr(chunk, "lang", None))
-            meta.setdefault("version", getattr(chunk, "version", None))
-            meta.setdefault("region", getattr(chunk, "region", None))
+            meta.setdefault("doc_id", chunk.doc_id)
+            meta.setdefault("doc_name", chunk.doc_name)
+
+            # Fill corpus_id for accurate context and queries
+            meta.setdefault("corpus_id", corpus_id)
+
+
+            # Helpful aliases (pick one display field and keep it consistent)
+            meta.setdefault("file_name", chunk.doc_name)
+            meta.setdefault("source", chunk.doc_name)
+
+            meta.setdefault("chunk_id", chunk.chunk_id)
+            meta.setdefault("chunk_index", idx)
+
+            meta.setdefault("section_type", chunk.section_type)
+            meta.setdefault("page_start", chunk.page_start)
+            meta.setdefault("page_end", chunk.page_end)
+
+            meta.setdefault("lang", chunk.lang)
+            meta.setdefault("version", chunk.version)
+            meta.setdefault("region", chunk.region)
+
+            meta.setdefault("ingested_at", int(time.time()))
 
             ids.append(chunk.chunk_id)
             documents.append(chunk.text)
@@ -147,27 +167,29 @@ class ChromaIFUVectorStore(IFUVectorStore):
                 len(query_vectors[0]) if query_vectors else -1,
             )
 
-            # 2) Build Chroma query parameters
+            # 2) Build and merge Chroma query parameters
             query_kwargs: Dict[str, Any] = {
                 "query_embeddings": query_vectors,
                 "n_results": n_results,
                 "include": ["documents", "metadatas", "distances"],
             }
-            if where is not None:
-                self.logger.debug("Applying metadata filter (where=%s)", where)
-                query_kwargs["where"] = where
 
-            self.logger.debug(
-                "Final Chroma query kwargs: keys=%s",
-                list(query_kwargs.keys())
-            )
+            # Enforce corpus scoping (server-side safety)
+            merged_where: Dict[str, Any] = dict(where or {})
+            merged_where.setdefault("corpus_id", ACTIVE_CORPUS_ID)
+
+            # Only attach where if it has something in it
+            if merged_where:
+                self.logger.debug("Applying metadata filter (where=%s)", merged_where)
+                query_kwargs["where"] = merged_where
 
             # 3) Execute Chroma query
             self.logger.debug("Issuing Chroma query against collection '%s'", self.collection_name)
             res = self.collection.query(**query_kwargs)
 
             # Log summary of results
-            returned = len(res.get("ids", []))
+            ids = res.get("ids") or [[]]
+            returned = len(ids[0]) if ids and isinstance(ids[0], list) else len(ids)
             self.logger.info(
                 "Chroma search complete: returned %d results (requested %d)",
                 returned,

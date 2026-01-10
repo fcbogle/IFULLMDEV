@@ -50,10 +50,22 @@ class LangDetectDetector:
         text = _prep(text)
         if len(text) < max(20, self.min_len // 2):
             return None
+
         code, score = langid.classify(text)
-        # langid score is not a probability but works as a confidence-like measure
+
+        import math
+        s = float(score)
+
+        # Numerically stable sigmoid
+        if s >= 0:
+            z = math.exp(-s)
+            conf = 1.0 / (1.0 + z)
+        else:
+            z = math.exp(s)
+            conf = z / (1.0 + z)
+
         script = "Latn"
-        return code, float(score), script
+        return code, conf, script
 
     def detect(self, text: str, fallback: str | None = None):
         # 1) Try langdetect on chunk
@@ -72,7 +84,7 @@ class LangDetectDetector:
                     return lang, conf, script
 
         # 3) Secondary: langid on the best available text
-        for candidate in (fallback or "", text or ""):
+        for candidate in (text or "", fallback or ""):
             got = self._detect_langid(candidate)
             if got:
                 return got

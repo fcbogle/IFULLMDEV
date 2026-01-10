@@ -192,7 +192,8 @@ def test_chroma_end_to_end_via_blob():
         if res.get("documents") and res["documents"][0]
         else ""
     )
-    print(f"\nTop match for query '{query}':\n{top_doc[:200].replace('\n', ' ')} …")
+    snippet = top_doc[:200].replace("\n", " ")
+    print(f"\nTop match for query '{query}':\n{snippet} …")
 
     # Clean up environment delete blob from storage and vectors from Chroma
     deleted = store.delete_by_doc_id(doc_id)

@@ -20,6 +20,7 @@ from loader.IFUDocumentLoader import IFUDocumentLoader
 from utility.logging_utils import get_class_logger
 from vectorstore.IFUVectorStore import IFUVectorStore
 
+from settings import ACTIVE_CORPUS_ID
 
 class IFUIngestService:
     """
@@ -49,6 +50,8 @@ class IFUIngestService:
         self.extractor = extractor
         self.collection_name = collection_name
         self.logger = logger or get_class_logger(self.__class__)
+
+
 
     @staticmethod
     def build_default_chunker(
@@ -165,8 +168,8 @@ class IFUIngestService:
             blob_name: str,
             document_type: str,
             pdf_bytes: Optional[bytes] = None,
-            source_path: Optional[Path] = None,
-    ) -> None:
+            source_path: Optional[Path] = None,) -> None:
+
         self.logger.info(
             "Processing blob '%s' from container '%s' into collection '%s'",
             blob_name,
@@ -236,7 +239,12 @@ class IFUIngestService:
         if len(records) != len(chunks):
             raise ValueError(f"Embedding count mismatch: {len(records)} != {len(chunks)}")
 
-        self.store.upsert_chunk_embeddings(doc_id, chunks, records=records)
+        self.store.upsert_chunk_embeddings(
+            doc_id=doc_id,
+            chunks=chunks,
+            records=records,
+            corpus_id=ACTIVE_CORPUS_ID,
+        )
 
         self.logger.info(
             "Successfully ingested blob '%s' into collection '%s'",
