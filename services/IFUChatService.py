@@ -56,7 +56,7 @@ class IFUChatService:
             # listing / awareness
             "what documents", "which documents", "list documents", "list the documents",
             "indexed documents", "ingested documents", "what is indexed", "what's indexed",
-            "what is in the corpus", "what's in the corpus",
+            "what is in the corpus", "what's in the corpus", "what does the document cover"
 
             # per-document overview / focus
             "each document", "every document",
@@ -70,6 +70,30 @@ class IFUChatService:
         ]
 
         return any(t in ql for t in triggers)
+
+    def _add_d_labels_to_samples(self, samples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Adds stable D# labels (D1, D2, ...) to the samples list.
+        Only used for inventory mode responses.
+        """
+        out: List[Dict[str, Any]] = []
+        for i, s in enumerate(samples or [], start=1):
+            d_label = f"D{i}"
+            s2 = dict(s)
+            s2["d_label"] = d_label
+
+            # Optional: also label the chunks so UI can group easily
+            chunks = s2.get("sample_chunks") or []
+            if isinstance(chunks, list):
+                labeled_chunks = []
+                for c in chunks:
+                    c2 = dict(c) if isinstance(c, dict) else {"text": str(c)}
+                    c2["d_label"] = d_label
+                    labeled_chunks.append(c2)
+                s2["sample_chunks"] = labeled_chunks
+
+            out.append(s2)
+        return out
 
     def ask(
             self,
@@ -122,12 +146,30 @@ class IFUChatService:
         force_inventory = mode_key == "inventory"
         force_qa = mode_key == "qa"
 
-        is_inventory = False
+        # --- MODE RESOLUTION ---
+        explicit_mode = None
         if force_inventory:
-            is_inventory = True
-        elif not force_qa:
-            is_inventory_fn = getattr(self, "_is_inventory_question", None)
-            is_inventory = callable(is_inventory_fn) and is_inventory_fn(q)
+            explicit_mode = "inventory"
+        elif force_qa:
+            explicit_mode = "qa"
+
+        auto_inventory = self._is_inventory_question(q)
+
+        resolved_mode = (
+            explicit_mode
+            if explicit_mode
+            else ("inventory" if auto_inventory else "qa")
+        )
+
+        is_inventory = resolved_mode == "inventory"
+
+        self.logger.info(
+            "ask: mode_resolved=%s (force_inventory=%s force_qa=%s auto_inventory=%s)",
+            resolved_mode,
+            force_inventory,
+            force_qa,
+            auto_inventory,
+        )
 
         # ----------------------------
         # INVENTORY PATH
@@ -143,6 +185,8 @@ class IFUChatService:
                 max_docs=25,
                 chunks_per_doc=2,
             )
+
+            samples = self._add_d_labels_to_samples(samples)
 
             messages = self._build_inventory_messages(
                 question=q,
@@ -431,10 +475,15 @@ class IFUChatService:
             "- ONLY describe what is visible in the excerpts.\n"
             "- Do NOT guess or imply content that is not shown.\n"
             "- If uncertain, say: 'Not shown in the excerpts.'\n\n"
+            "D# DOCUMENT LABELS (IMPORTANT):\n"
+            "- Each document has a label D1, D2, D3, ... as shown in DOCUMENT MAP.\n"
+            "- In your answer, always refer to documents using their D# label.\n"
+            "- You may include the filename too, but always include the D#.\n"
+            "- Do not mention documents that are not in the DOCUMENT MAP.\n\n"
             "OUTPUT FORMAT:\n"
-            "- For each document: a short paragraph overview + 3–6 topic bullets.\n"
-            "- Use the document name exactly as provided.\n"
-            "- Do not mention documents that are not in the provided list.\n\n"
+            "- Start with a short DOCUMENT MAP: D# = document name.\n"
+            "- Then for each document: a short paragraph overview + 3–6 topic bullets.\n"
+            "- Use the document name exactly as provided.\n\n"
             "REGULATORY SAFETY:\n"
             "- Do not provide medical advice beyond what is shown.\n\n"
             f"TONE GUIDANCE:\n{tone_instruction}"
@@ -449,11 +498,17 @@ class IFUChatService:
             if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": content})
 
-        # compact excerpt block
+        doc_map_lines: List[str] = []
         lines: List[str] = []
-        for d in samples:
+
+        for d in (samples or []):
+            # use existing label from JSON (Option A)
+            d_label = (d.get("d_label") or "").strip() or "D?"
             doc_name = d.get("doc_name") or d.get("doc_id") or "Unknown"
-            lines.append(f"DOCUMENT: {doc_name}")
+
+            doc_map_lines.append(f"{d_label} = {doc_name}")
+
+            lines.append(f"{d_label} DOCUMENT: {doc_name}")
             chunks = d.get("sample_chunks") or []
             if not chunks:
                 lines.append("EXCERPTS: [none returned for requested filter]")
@@ -466,16 +521,23 @@ class IFUChatService:
                     lines.append(prefix + txt)
             lines.append("")
 
+        doc_map_text = "\n".join(doc_map_lines).strip() if doc_map_lines else "[no documents returned]"
+        excerpts_text = "\n".join(lines).strip() if lines else "[no excerpts returned]"
+
         user = (
-                f"Question:\n{question}\n\n"
-                "EXCERPTS BY DOCUMENT:\n"
-                + "\n".join(lines).strip()
-                + "\n\n"
-                  "Write the overview and topic bullets per document. Remember: do not guess beyond excerpts."
+            f"Question:\n{question}\n\n"
+            "DOCUMENT MAP:\n"
+            f"{doc_map_text}\n\n"
+            "EXCERPTS BY DOCUMENT:\n"
+            f"{excerpts_text}\n\n"
+            "Write the overview and topic bullets per document. "
+            "Remember: do not guess beyond excerpts. "
+            "Always refer to documents using D# labels."
         )
 
         messages.append({"role": "user", "content": user})
         return messages
+
 
 
 

@@ -701,7 +701,17 @@ def ui_chat(
     ]
 
     sources_df = pd.DataFrame(sources)
-    debug = json.dumps({"model": out.get("model"), "usage": out.get("usage"), "n_sources": len(sources)}, indent=2)
+    debug = json.dumps(
+        {
+            "mode": out.get("mode"),
+            "corpus_id": out.get("corpus_id"),
+            "model": out.get("model"),
+            "usage": out.get("usage"),
+            "n_sources": len(sources),
+            "n_samples": len(out.get("samples") or []),
+        },
+        indent=2,
+    )
 
     return chat_messages, debug, sources_df, api_history
 

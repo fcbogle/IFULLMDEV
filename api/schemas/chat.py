@@ -45,6 +45,8 @@ class ChatResponse(BaseModel):
     mode: Optional[str] = None
     corpus_id: Optional[str] = None
 
+    samples: Optional[List[Dict[str, Any]]] = None
+
     # helpful for debugging / telemetry
     model: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None

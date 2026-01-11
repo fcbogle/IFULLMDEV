@@ -170,6 +170,7 @@ def post_chat(
         sources=sources,
         mode=out.get("mode"),
         corpus_id=out.get("corpus_id"),
+        samples=out.get("samples"),
         model=out.get("model"),
         usage=out.get("usage"),
     )
