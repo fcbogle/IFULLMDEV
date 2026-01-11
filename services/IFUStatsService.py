@@ -127,3 +127,43 @@ class IFUStatsService:
             total_blobs=total_blobs,
             blobs=blobs,
         )
+
+    def get_indexed_doc_samples(
+            self,
+            *,
+            blob_container: str,
+            corpus_id: Optional[str] = None,
+            lang: Optional[str] = None,
+            max_docs: int = 10,
+            chunks_per_doc: int = 3,
+    ) -> List[Dict[str, Any]]:
+        corpus = corpus_id or ACTIVE_CORPUS_ID
+        lang_norm = (lang or "").strip().lower() or None
+
+        stats = self.get_stats(blob_container=blob_container, corpus_id=corpus)
+        docs = (stats.documents or [])[:max_docs]
+
+        results: List[Dict[str, Any]] = []
+        for d in docs:
+            samples = self.vector_store.get_doc_sample_chunks(
+                doc_id=d.doc_id,
+                corpus_id=corpus,
+                container=blob_container,
+                lang=lang_norm,
+                max_chunks=chunks_per_doc,
+            )
+
+            results.append(
+                {
+                    "doc_id": d.doc_id,
+                    "doc_name": getattr(d, "doc_name", None) or d.doc_id,
+                    "chunk_count": d.chunk_count,
+                    "page_count": d.page_count,
+                    "primary_lang": getattr(d, "primary_lang", None),
+                    "requested_lang": lang_norm,
+                    "sample_chunk_count": len(samples),
+                    "sample_chunks": samples,
+                }
+            )
+
+        return results

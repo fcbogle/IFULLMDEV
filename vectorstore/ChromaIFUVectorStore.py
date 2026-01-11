@@ -5,7 +5,7 @@
 # -----------------------------------------------------------------------------
 import time
 from dataclasses import dataclass
-from typing import Sequence, Dict, Any, List, Counter
+from typing import Sequence, Dict, Any, List, Counter, Optional
 
 import chromadb
 from chromadb import ClientAPI
@@ -364,4 +364,82 @@ class ChromaIFUVectorStore(IFUVectorStore):
 
         self.logger.info("list_documents docs summary: %r", docs[:2])
         return docs
+
+    # helper method for returning sample chunks for chatbot context
+    def _as_chroma_where(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        if not filters:
+            return {}
+        if len(filters) == 1:
+            return filters
+        return {"$and": [{k: v} for k, v in filters.items()]}
+
+    def get_doc_sample_chunks(
+            self,
+            *,
+            doc_id: str,
+            corpus_id: Optional[str] = None,
+            container: Optional[str] = None,
+            lang: Optional[str] = None,
+            max_chunks: int = 5,
+            max_chars_per_chunk: int = 2000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch a small, deterministic sample of chunks for a given doc_id.
+
+        Filters:
+          - corpus_id (defaults to ACTIVE_CORPUS_ID)
+          - optional container
+          - optional lang (e.g., "en", "pt", "de")
+
+        Ordering:
+          - sorted by chunk_index (if present) for determinism
+        """
+        corpus = corpus_id or ACTIVE_CORPUS_ID
+        lang_norm = (lang or "").strip().lower() or None
+
+        filters: Dict[str, Any] = {"doc_id": doc_id, "corpus_id": corpus}
+        if container:
+            filters["container"] = container
+        if lang_norm:
+            filters["lang"] = lang_norm
+
+        where = self._as_chroma_where(filters)
+
+        res = self.collection.get(where=where, include=["documents", "metadatas"])
+        docs: List[str] = res.get("documents") or []
+        metas: List[Dict[str, Any]] = res.get("metadatas") or []
+
+        pairs = list(zip(docs, metas))
+
+        def _sort_key(p: Any) -> int:
+            md = p[1] or {}
+            try:
+                return int(md.get("chunk_index", 10 ** 9))
+            except Exception:
+                return 10 ** 9
+
+        pairs.sort(key=_sort_key)
+
+        out: List[Dict[str, Any]] = []
+        for text, md in pairs[:max_chunks]:
+            md = md or {}
+            t = (text or "").strip()
+            if max_chars_per_chunk and len(t) > max_chars_per_chunk:
+                t = t[:max_chars_per_chunk] + "…"
+
+            out.append(
+                {
+                    "doc_id": md.get("doc_id"),
+                    "doc_name": md.get("doc_name") or md.get("source") or md.get("file_name"),
+                    "chunk_id": md.get("chunk_id"),
+                    "chunk_index": md.get("chunk_index"),
+                    "page_start": md.get("page_start"),
+                    "page_end": md.get("page_end"),
+                    "lang": md.get("lang"),
+                    "section_type": md.get("section_type"),
+                    "text": t,
+                }
+            )
+
+        return out
 

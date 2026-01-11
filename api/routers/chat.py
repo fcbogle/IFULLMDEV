@@ -17,6 +17,8 @@ from services.IFUStatsService import IFUStatsService
 
 DEFAULT_BLOB_CONTAINER = "default-container"
 
+from settings import ACTIVE_CORPUS_ID
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -87,28 +89,27 @@ def post_chat(
         req.n_results,
     )
 
-    # Determine which container to ask stats for:
     # priority: where override -> request.container -> default
     container = _extract_container_from_where(req.where) or getattr(req, "container", None) or DEFAULT_BLOB_CONTAINER
+    effective_corpus = getattr(req, "corpus_id", None) or ACTIVE_CORPUS_ID
 
-    # Best-effort stats context: never fail chat if stats fails
     stats_context: Optional[str] = None
     stats_status = "disabled"
 
-    # Optional: allow request to provide its own stats_context (manual override)
     if getattr(req, "stats_context", None):
         stats_context = req.stats_context
         stats_status = "provided"
     else:
         try:
-            stats = stats_svc.get_stats(blob_container=container)  # ensure kwarg name matches your service
+            stats = stats_svc.get_stats(blob_container=container, corpus_id=effective_corpus)
             stats_dict = stats.model_dump() if hasattr(stats, "model_dump") else dict(stats)
             stats_context = _format_stats_context(stats_dict)
             stats_status = "ok" if stats_context else "empty"
         except Exception as e:
             logger.warning(
-                "POST /chat stats fetch failed (container='%s'): %s",
+                "POST /chat stats fetch failed (container='%s' corpus_id='%s'): %s",
                 container,
+                effective_corpus,
                 e,
                 exc_info=True,
             )
@@ -116,14 +117,18 @@ def post_chat(
             stats_status = "error"
 
     logger.info(
-        "POST /chat stats: container='%s' stats_status=%s stats_context_chars=%d",
+        "POST /chat stats: container='%s' corpus_id='%s' stats_status=%s stats_context_chars=%d",
         container,
+        effective_corpus,
         stats_status,
         len(stats_context or ""),
     )
 
     try:
         out: Dict[str, Any] = svc.ask(
+            container=container,
+            corpus_id=effective_corpus,
+            mode=getattr(req, "mode", None),
             question=question,
             n_results=req.n_results,
             where=req.where,
@@ -134,12 +139,11 @@ def post_chat(
             language=req.language,
             stats_context=stats_context,
         )
-        logger.info("POST /chat req: tone=%s language=%s", req.tone, req.language)
+        logger.info("POST /chat req: tone=%s language=%s mode=%s corpus_id=%s", req.tone, req.language, getattr(req, "mode", None), effective_corpus)
     except Exception as e:
         logger.exception("post_chat failed: %s", e)
         raise HTTPException(status_code=500, detail=f"chat failed: {e}")
 
-    # Map sources
     raw_sources: List[Dict[str, Any]] = out.get("sources", []) or []
     sources = [
         ChatSource(
@@ -164,6 +168,8 @@ def post_chat(
         answer=out["answer"],
         n_results=req.n_results,
         sources=sources,
+        mode=out.get("mode"),
+        corpus_id=out.get("corpus_id"),
         model=out.get("model"),
         usage=out.get("usage"),
     )

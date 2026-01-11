@@ -9,9 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional
 
+from services.IFUStatsService import IFUStatsService
 from utility.logging_utils import get_class_logger
 from services.IFUQueryService import IFUQueryService
 from chat.OpenAIChat import OpenAIChat
+
+from settings import ACTIVE_CORPUS_ID
 
 
 @dataclass
@@ -32,6 +35,8 @@ class IFUChatService:
 
     query_service: IFUQueryService
     chat_client: OpenAIChat
+    stats_service: IFUStatsService
+
     logger: Any = None
 
     max_context_chars: int = 12000
@@ -45,18 +50,42 @@ class IFUChatService:
             type(self.chat_client).__name__,
         )
 
+    def _is_inventory_question(self, q: str) -> bool:
+        ql = (q or "").strip().lower()
+        triggers = [
+            # listing / awareness
+            "what documents", "which documents", "list documents", "list the documents",
+            "indexed documents", "ingested documents", "what is indexed", "what's indexed",
+            "what is in the corpus", "what's in the corpus",
+
+            # per-document overview / focus
+            "each document", "every document",
+            "each indexed document", "each ingested document",
+            "focuses on", "focus of each", "what each document covers",
+            "overview of each", "summary of each", "summarise each", "summarize each",
+            "document overview", "document summary",
+
+            # sampling wording
+            "sample chunks", "samples", "excerpts",
+        ]
+
+        return any(t in ql for t in triggers)
+
     def ask(
-        self,
-        *,
-        question: str,
-        n_results: int = 5,
-        where: Optional[Dict[str, Any]] = None,
-        temperature: float = 0.0,
-        max_tokens: int = 512,
-        history: Optional[List[Dict[str, str]]] = None,
-        tone: str = "neutral",
-        language: str = "en",
-        stats_context: Optional[str] = None,
+            self,
+            *,
+            container: str = "ifu-docs-test",
+            corpus_id: Optional[str] = None,
+            mode: Optional[str] = None,
+            question: str,
+            n_results: int = 5,
+            where: Optional[Dict[str, Any]] = None,
+            temperature: float = 0.0,
+            max_tokens: int = 512,
+            history: Optional[List[Dict[str, str]]] = None,
+            tone: str = "neutral",
+            language: str = "en",
+            stats_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         q = (question or "").strip()
         if not q:
@@ -68,9 +97,16 @@ class IFUChatService:
             tone_key = "neutral"
 
         lang = (language or "en").strip().lower()
+        mode_key = (mode or "").strip().lower() or None
+
+        blob_container = (container or "ifu-docs-test").strip()
+        effective_corpus = (corpus_id or ACTIVE_CORPUS_ID).strip()
 
         self.logger.info(
-            "ask: q_len=%d n_results=%d tone=%s lang=%s where=%s stats_ctx=%s stats_len=%d",
+            "ask: mode=%s corpus=%s container=%s q_len=%d n_results=%d tone=%s lang=%s where=%s stats_ctx=%s stats_len=%d",
+            mode_key,
+            effective_corpus,
+            blob_container,
             len(q),
             n_results,
             tone_key,
@@ -80,15 +116,98 @@ class IFUChatService:
             len(stats_context or ""),
         )
 
-        # 1) Retrieve
-        raw = self.query_service.query(query_text=q, n_results=n_results, where=where)
+        # ----------------------------
+        # 0) Decide inventory vs QA
+        # ----------------------------
+        force_inventory = mode_key == "inventory"
+        force_qa = mode_key == "qa"
+
+        is_inventory = False
+        if force_inventory:
+            is_inventory = True
+        elif not force_qa:
+            is_inventory_fn = getattr(self, "_is_inventory_question", None)
+            is_inventory = callable(is_inventory_fn) and is_inventory_fn(q)
+
+        # ----------------------------
+        # INVENTORY PATH
+        # ----------------------------
+        if is_inventory:
+            # inventory language filter should be optional
+            lang_filter = (lang or "").strip().lower() or None
+
+            samples = self.stats_service.get_indexed_doc_samples(
+                blob_container=blob_container,
+                corpus_id=effective_corpus,
+                lang=lang_filter,
+                max_docs=25,
+                chunks_per_doc=2,
+            )
+
+            messages = self._build_inventory_messages(
+                question=q,
+                samples=samples,
+                history=history,
+                tone=tone_key,
+                language=lang,
+            )
+
+            if not messages:
+                raise ValueError("messages must be non-empty")
+
+            resp = self.chat_client.chat(
+                messages=messages,
+                temperature=float(temperature),
+                max_tokens=int(max_tokens),
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+            usage = getattr(resp, "usage", None)
+            model = getattr(resp, "model", None)
+
+            return {
+                "mode": "inventory",
+                "corpus_id": effective_corpus,
+                "question": q,
+                "answer": answer,
+                "n_results": n_results,
+                "sources": [],
+                "samples": samples,  # remove if your response schema disallows extra fields
+                "tone": tone_key,
+                "language": lang,
+                "model": model,
+                "usage": usage.model_dump() if hasattr(usage, "model_dump") else (
+                    usage if isinstance(usage, dict) else None
+                ),
+            }
+
+        # ----------------------------
+        # QA PATH
+        # ----------------------------
+
+        # Merge caller where with enforced scoping
+        merged_filters: Dict[str, Any] = dict(where or {})
+        merged_filters.setdefault("corpus_id", effective_corpus)
+        merged_filters.setdefault("container", blob_container)
+
+        # Enforce retrieval language (optional). If you want response language separate from retrieval,
+        # gate this behind a flag or use where instead.
+        if lang:
+            merged_filters.setdefault("lang", lang)
+
+        # Chroma: if multiple filters, wrap in $and
+        if len(merged_filters) == 1:
+            retrieval_where = merged_filters
+        elif "$and" in merged_filters or "$or" in merged_filters:
+            retrieval_where = merged_filters
+        else:
+            retrieval_where = {"$and": [{k: v} for k, v in merged_filters.items()]}
+
+        raw = self.query_service.query(query_text=q, n_results=n_results, where=retrieval_where)
         hits = self.query_service.to_hits(raw, include_text=True, include_scores=True, include_metadata=True)
         self.logger.info("ask: retrieved_hits=%d", len(hits))
 
-        # 2) Build context
         context_text = self._build_context(hits)
 
-        # 3) Compose messages (tone in system prompt)
         messages = self._build_messages(
             question=q,
             context=context_text,
@@ -96,22 +215,31 @@ class IFUChatService:
             tone=tone_key,
             language=lang,
             stats_context=stats_context,
+            # (optional) pass retrieved_sources/allowed_docs if you wire them
         )
 
-        # 4) Call LLM
-        resp = self.chat_client.chat(messages=messages, temperature=float(temperature), max_tokens=int(max_tokens))
+        resp = self.chat_client.chat(
+            messages=messages,
+            temperature=float(temperature),
+            max_tokens=int(max_tokens),
+        )
         answer = (resp.choices[0].message.content or "").strip()
         usage = getattr(resp, "usage", None)
         model = getattr(resp, "model", None)
 
         return {
+            "mode": "qa",
+            "corpus_id": effective_corpus,
             "question": q,
             "answer": answer,
+            "n_results": n_results,
             "sources": hits,
             "tone": tone_key,
             "language": lang,
             "model": model,
-            "usage": usage.model_dump() if hasattr(usage, "model_dump") else (usage if isinstance(usage, dict) else None),
+            "usage": usage.model_dump() if hasattr(usage, "model_dump") else (
+                usage if isinstance(usage, dict) else None
+            ),
         }
 
     def _build_context(self, hits: List[Dict[str, Any]]) -> str:
@@ -281,6 +409,75 @@ class IFUChatService:
 
         messages.append({"role": "user", "content": user})
         return messages
+
+    def _build_inventory_messages(
+            self,
+            *,
+            question: str,
+            samples: List[Dict[str, Any]],
+            history: Optional[List[Dict[str, str]]] = None,
+            tone: str = "neutral",
+            language: str = "en",
+    ) -> List[Dict[str, str]]:
+        tone_instruction = self.TONE_PRESETS.get(tone, self.TONE_PRESETS["neutral"])
+        lang = (language or "en").strip().lower()
+
+        system = (
+            f"Respond in {lang}. Do not switch languages unless the user asks.\n\n"
+            "You are helping the user understand what indexed IFU documents cover.\n\n"
+            "IMPORTANT LIMITATION:\n"
+            "- You are given ONLY short EXCERPTS (sample chunks) from each document.\n"
+            "- These excerpts are NOT the full IFU.\n"
+            "- ONLY describe what is visible in the excerpts.\n"
+            "- Do NOT guess or imply content that is not shown.\n"
+            "- If uncertain, say: 'Not shown in the excerpts.'\n\n"
+            "OUTPUT FORMAT:\n"
+            "- For each document: a short paragraph overview + 3–6 topic bullets.\n"
+            "- Use the document name exactly as provided.\n"
+            "- Do not mention documents that are not in the provided list.\n\n"
+            "REGULATORY SAFETY:\n"
+            "- Do not provide medical advice beyond what is shown.\n\n"
+            f"TONE GUIDANCE:\n{tone_instruction}"
+        )
+
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
+
+        # history for conversational flow (not factual)
+        for m in (history or []):
+            role = (m.get("role") or "").strip()
+            content = (m.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+        # compact excerpt block
+        lines: List[str] = []
+        for d in samples:
+            doc_name = d.get("doc_name") or d.get("doc_id") or "Unknown"
+            lines.append(f"DOCUMENT: {doc_name}")
+            chunks = d.get("sample_chunks") or []
+            if not chunks:
+                lines.append("EXCERPTS: [none returned for requested filter]")
+            else:
+                for c in chunks:
+                    page = c.get("page_start")
+                    cl = c.get("lang")
+                    txt = (c.get("text") or "").strip()
+                    prefix = f"- (lang={cl}" + (f", p.{page}" if page else "") + "): "
+                    lines.append(prefix + txt)
+            lines.append("")
+
+        user = (
+                f"Question:\n{question}\n\n"
+                "EXCERPTS BY DOCUMENT:\n"
+                + "\n".join(lines).strip()
+                + "\n\n"
+                  "Write the overview and topic bullets per document. Remember: do not guess beyond excerpts."
+        )
+
+        messages.append({"role": "user", "content": user})
+        return messages
+
+
 
 
 

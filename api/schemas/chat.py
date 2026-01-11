@@ -13,6 +13,8 @@ from api.schemas.query import QueryHit
 
 class ChatRequest(BaseModel):
     container: str = Field("ifu-docs-test", min_length=1)
+    corpus_id: Optional[str] = None
+    mode: Optional[str] = None
     question: str = Field(..., min_length=1)
     n_results: int = Field(5, ge=1, le=20)
     where: Optional[Dict[str, Any]] = None
@@ -39,6 +41,9 @@ class ChatResponse(BaseModel):
     answer: str
     n_results: int
     sources: List[ChatSource] = Field(default_factory=list)
+
+    mode: Optional[str] = None
+    corpus_id: Optional[str] = None
 
     # helpful for debugging / telemetry
     model: Optional[str] = None

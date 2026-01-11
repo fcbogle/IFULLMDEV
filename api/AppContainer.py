@@ -86,6 +86,7 @@ class AppContainer:
         self.chat_service = IFUChatService(
             query_service=self.query_service,
             chat_client=self.openai_chat,
+            stats_service=self.stats_service,
         )
 
         # Return a singleton IFUBlobService instance
