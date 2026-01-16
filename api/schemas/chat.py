@@ -25,7 +25,9 @@ class ChatRequest(BaseModel):
     language: str = Field("en")
     stats_context: Optional[str] = None
 
+    mode: Optional[str] = Field(default=None, description="qa | inventory | ops")
 
+    stats_context: Optional[str] = None
 
 class ChatSource(BaseModel):
     doc_id: Optional[str] = None

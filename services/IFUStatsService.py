@@ -167,3 +167,40 @@ class IFUStatsService:
             )
 
         return results
+
+    def get_storage_index_delta(self, *, blob_container: str, corpus_id: str) -> dict:
+        # --- storage side ---
+        stats = self.get_stats(blob_container=blob_container, corpus_id=corpus_id)
+        storage_blob_names = {
+            b.blob_name for b in (stats.blobs or [])
+            if getattr(b, "blob_name", None)
+        }
+
+        # --- indexed side (Chroma) ---
+        metadatas = self._get_metadatas_for(blob_container=blob_container, corpus_id=corpus_id)
+
+        # IMPORTANT: metadatas are chunk-level; we dedupe to document level
+        indexed_blob_names = {
+            (m.get("blob_name") or m.get("doc_id"))
+            for m in (metadatas or [])
+            if isinstance(m, dict) and (m.get("blob_name") or m.get("doc_id"))
+        }
+
+        # --- set deltas ---
+        blobs_not_indexed = sorted(storage_blob_names - indexed_blob_names)
+        indexed_not_in_storage = sorted(indexed_blob_names - storage_blob_names)
+        indexed_in_storage = sorted(indexed_blob_names & storage_blob_names)
+
+        return {
+            "blob_container": blob_container,
+            "corpus_id": corpus_id,
+            "total_blobs": len(storage_blob_names),
+            "total_documents": len(indexed_blob_names),
+            "blobs_not_indexed_count": len(blobs_not_indexed),
+            "indexed_not_in_storage_count": len(indexed_not_in_storage),
+            "indexed_in_storage_count": len(indexed_in_storage),
+            "blobs_not_indexed": blobs_not_indexed,
+            "indexed_not_in_storage": indexed_not_in_storage,
+            "indexed_in_storage": indexed_in_storage[:50],  # prevent huge payloads
+        }
+

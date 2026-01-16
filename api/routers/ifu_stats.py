@@ -60,3 +60,15 @@ def get_ifu_samples(
         chunks_per_doc=chunks_per_doc,
     )
 
+@router.get("/delta")
+def get_ifu_delta(
+    svc: IFUStatsService = Depends(get_stats_service),
+    blob_container: str = Query("ifu-docs-test"),
+    corpus_id: Optional[str] = Query(default=None),
+):
+    effective_corpus = corpus_id or ACTIVE_CORPUS_ID
+    return svc.get_storage_index_delta(
+        blob_container=blob_container,
+        corpus_id=effective_corpus,
+    )
+

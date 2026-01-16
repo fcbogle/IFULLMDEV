@@ -56,7 +56,7 @@ class IFUChatService:
             # listing / awareness
             "what documents", "which documents", "list documents", "list the documents",
             "indexed documents", "ingested documents", "what is indexed", "what's indexed",
-            "what is in the corpus", "what's in the corpus", "what does the document cover"
+            "what is in the corpus", "what's in the corpus", "what does the document cover",
 
             # per-document overview / focus
             "each document", "every document",
@@ -64,6 +64,10 @@ class IFUChatService:
             "focuses on", "focus of each", "what each document covers",
             "overview of each", "summary of each", "summarise each", "summarize each",
             "document overview", "document summary",
+
+            # size / scale of corpus
+            "corpus size", "how big is the corpus", "total chunks", "total documents",
+            "how many chunks", "how many documents", "indexed corpus", "indexed size",
 
             # sampling wording
             "sample chunks", "samples", "excerpts",
@@ -95,6 +99,20 @@ class IFUChatService:
             out.append(s2)
         return out
 
+    def _is_ops_question(self, q: str) -> bool:
+        ql = (q or "").strip().lower()
+        triggers = [
+            # operational terms
+            "blob", "blobs", "storage",
+            "indexed", "ingested",
+            "vector", "vectors", "chroma", "collection",
+            "corpus", "delta",
+            "not indexed", "missing", "difference",
+            "how many blobs", "how many documents", "size of the corpus",
+            "last indexed", "when was it indexed", "recent indexing",
+        ]
+        return any(t in ql for t in triggers)
+
     def ask(
             self,
             *,
@@ -110,6 +128,7 @@ class IFUChatService:
             tone: str = "neutral",
             language: str = "en",
             stats_context: Optional[str] = None,
+            ops_context: Optional[str] = None
     ) -> Dict[str, Any]:
         q = (question or "").strip()
         if not q:
@@ -127,7 +146,7 @@ class IFUChatService:
         effective_corpus = (corpus_id or ACTIVE_CORPUS_ID).strip()
 
         self.logger.info(
-            "ask: mode=%s corpus=%s container=%s q_len=%d n_results=%d tone=%s lang=%s where=%s stats_ctx=%s stats_len=%d",
+            "ask: mode=%s resolved? corpus=%s container=%s q_len=%d n_results=%d tone=%s lang=%s where=%s stats_ctx=%s ops_ctx=%s",
             mode_key,
             effective_corpus,
             blob_container,
@@ -137,44 +156,46 @@ class IFUChatService:
             lang,
             "yes" if where else "no",
             "yes" if stats_context else "no",
-            len(stats_context or ""),
+            "yes" if ops_context else "no",
         )
 
         # ----------------------------
-        # 0) Decide inventory vs QA
+        # 0) Decide mode: ops vs inventory vs qa
         # ----------------------------
+        mode_key = (mode or "").strip().lower() or None
         force_inventory = mode_key == "inventory"
         force_qa = mode_key == "qa"
+        force_ops = mode_key == "ops"
 
-        # --- MODE RESOLUTION ---
-        explicit_mode = None
-        if force_inventory:
-            explicit_mode = "inventory"
+        # auto-detect only if not forced
+        auto_inventory = False if (force_inventory or force_qa or force_ops) else self._is_inventory_question(q)
+        auto_ops = False if (force_inventory or force_qa or force_ops) else self._is_ops_question(q)
+
+        if force_ops:
+            resolved_mode = "ops"
+        elif force_inventory:
+            resolved_mode = "inventory"
         elif force_qa:
-            explicit_mode = "qa"
-
-        auto_inventory = self._is_inventory_question(q)
-
-        resolved_mode = (
-            explicit_mode
-            if explicit_mode
-            else ("inventory" if auto_inventory else "qa")
-        )
-
-        is_inventory = resolved_mode == "inventory"
+            resolved_mode = "qa"
+        else:
+            # priority: ops > inventory > qa
+            resolved_mode = "ops" if auto_ops else ("inventory" if auto_inventory else "qa")
 
         self.logger.info(
-            "ask: mode_resolved=%s (force_inventory=%s force_qa=%s auto_inventory=%s)",
+            "ask: mode_resolved=%s (mode_key=%r force_ops=%s force_inventory=%s force_qa=%s auto_ops=%s auto_inventory=%s)",
             resolved_mode,
+            mode_key,
+            force_ops,
             force_inventory,
             force_qa,
+            auto_ops,
             auto_inventory,
         )
 
         # ----------------------------
         # INVENTORY PATH
         # ----------------------------
-        if is_inventory:
+        if resolved_mode == "inventory":
             # inventory language filter should be optional
             lang_filter = (lang or "").strip().lower() or None
 
@@ -225,6 +246,42 @@ class IFUChatService:
             }
 
         # ----------------------------
+        # OPS PATH (operational/system awareness)
+        # ----------------------------
+        if resolved_mode == "ops":
+            messages = self._build_ops_messages(
+                question=q,
+                ops_context=ops_context or "[No operational context provided]",
+                history=history,
+                tone=tone_key,
+                language=lang,
+            )
+
+            resp = self.chat_client.chat(
+                messages=messages,
+                temperature=float(temperature),
+                max_tokens=int(max_tokens),
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+            usage = getattr(resp, "usage", None)
+            model = getattr(resp, "model", None)
+
+            return {
+                "mode": "ops",
+                "corpus_id": effective_corpus,
+                "question": q,
+                "answer": answer,
+                "n_results": n_results,
+                "sources": [],
+                "tone": tone_key,
+                "language": lang,
+                "model": model,
+                "usage": usage.model_dump() if hasattr(usage, "model_dump") else (
+                    usage if isinstance(usage, dict) else None
+                ),
+            }
+
+        # ----------------------------
         # QA PATH
         # ----------------------------
 
@@ -233,12 +290,11 @@ class IFUChatService:
         merged_filters.setdefault("corpus_id", effective_corpus)
         merged_filters.setdefault("container", blob_container)
 
-        # Enforce retrieval language (optional). If you want response language separate from retrieval,
-        # gate this behind a flag or use where instead.
-        if lang:
-            merged_filters.setdefault("lang", lang)
+        # Optional: enforce retrieval language only if caller didn't specify one
+        # (prevents surprising behaviour if they pass {"lang": "de"} explicitly)
+        if "lang" not in merged_filters and lang:
+            merged_filters["lang"] = lang
 
-        # Chroma: if multiple filters, wrap in $and
         if len(merged_filters) == 1:
             retrieval_where = merged_filters
         elif "$and" in merged_filters or "$or" in merged_filters:
@@ -468,22 +524,24 @@ class IFUChatService:
 
         system = (
             f"Respond in {lang}. Do not switch languages unless the user asks.\n\n"
-            "You are helping the user understand what indexed IFU documents cover.\n\n"
-            "IMPORTANT LIMITATION:\n"
-            "- You are given ONLY short EXCERPTS (sample chunks) from each document.\n"
-            "- These excerpts are NOT the full IFU.\n"
-            "- ONLY describe what is visible in the excerpts.\n"
-            "- Do NOT guess or imply content that is not shown.\n"
-            "- If uncertain, say: 'Not shown in the excerpts.'\n\n"
+            "You are helping the user understand what indexed IFU documents cover using ONLY the excerpts provided.\n\n"
+            "HARD RULES (MOST IMPORTANT):\n"
+            "- You MUST ground every statement in the provided excerpts.\n"
+            "- Do NOT guess, do NOT generalise from typical IFU structure.\n"
+            "- If an excerpt does not show something, say: 'Not shown in the excerpts.'\n"
+            "- If a document has no excerpts, say: 'No excerpts returned for this document (filter too strict or no data).'\n\n"
             "D# DOCUMENT LABELS (IMPORTANT):\n"
-            "- Each document has a label D1, D2, D3, ... as shown in DOCUMENT MAP.\n"
-            "- In your answer, always refer to documents using their D# label.\n"
-            "- You may include the filename too, but always include the D#.\n"
-            "- Do not mention documents that are not in the DOCUMENT MAP.\n\n"
-            "OUTPUT FORMAT:\n"
-            "- Start with a short DOCUMENT MAP: D# = document name.\n"
-            "- Then for each document: a short paragraph overview + 3–6 topic bullets.\n"
-            "- Use the document name exactly as provided.\n\n"
+            "- Each document has a label D1, D2, D3... (DOCUMENT MAP).\n"
+            "- ALWAYS refer to documents using their D# label in your answer.\n"
+            "- You may include the filename, but always include D#.\n"
+            "- Do NOT mention any document not in the DOCUMENT MAP.\n\n"
+            "OUTPUT FORMAT (STRICT):\n"
+            "1) DOCUMENT MAP: one line per doc.\n"
+            "2) FOR EACH DOCUMENT:\n"
+            "   - Title line: D# — filename\n"
+            "   - 'What the excerpts show' (1–2 sentences)\n"
+            "   - 'Key topics visible' (3–6 bullets)\n"
+            "   - 'Evidence snippets' (quote 1–3 short verbatim snippets from the excerpts)\n\n"
             "REGULATORY SAFETY:\n"
             "- Do not provide medical advice beyond what is shown.\n\n"
             f"TONE GUIDANCE:\n{tone_instruction}"
@@ -498,45 +556,105 @@ class IFUChatService:
             if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": content})
 
+        # Build a compact but explicit document map + excerpt payload
         doc_map_lines: List[str] = []
-        lines: List[str] = []
+        excerpt_blocks: List[str] = []
 
-        for d in (samples or []):
-            # use existing label from JSON (Option A)
-            d_label = (d.get("d_label") or "").strip() or "D?"
+        for idx, d in enumerate(samples or [], start=1):
+            d_label = (d.get("d_label") or "").strip() or f"D{idx}"
             doc_name = d.get("doc_name") or d.get("doc_id") or "Unknown"
 
             doc_map_lines.append(f"{d_label} = {doc_name}")
 
-            lines.append(f"{d_label} DOCUMENT: {doc_name}")
+            excerpt_blocks.append(f"{d_label} DOCUMENT: {doc_name}")
+
             chunks = d.get("sample_chunks") or []
             if not chunks:
-                lines.append("EXCERPTS: [none returned for requested filter]")
-            else:
-                for c in chunks:
-                    page = c.get("page_start")
-                    cl = c.get("lang")
-                    txt = (c.get("text") or "").strip()
-                    prefix = f"- (lang={cl}" + (f", p.{page}" if page else "") + "): "
-                    lines.append(prefix + txt)
-            lines.append("")
+                excerpt_blocks.append("EXCERPTS: [none returned for requested filter]")
+                excerpt_blocks.append("")
+                continue
+
+            # include a numbered excerpt list (easy for the model to quote)
+            excerpt_blocks.append("EXCERPTS:")
+            for j, c in enumerate(chunks, start=1):
+                page = c.get("page_start")
+                cl = c.get("lang")
+                txt = (c.get("text") or "").strip()
+
+                # keep excerpts short to reduce token bloat + force precision
+                if len(txt) > 450:
+                    txt = txt[:450].rstrip() + "…"
+
+                meta_bits = []
+                if cl:
+                    meta_bits.append(f"lang={cl}")
+                if page:
+                    meta_bits.append(f"p.{page}")
+                meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
+
+                excerpt_blocks.append(f"[{d_label}.{j}]{meta} {txt}")
+
+            excerpt_blocks.append("")
 
         doc_map_text = "\n".join(doc_map_lines).strip() if doc_map_lines else "[no documents returned]"
-        excerpts_text = "\n".join(lines).strip() if lines else "[no excerpts returned]"
+        excerpts_text = "\n".join(excerpt_blocks).strip() if excerpt_blocks else "[no excerpts returned]"
 
         user = (
             f"Question:\n{question}\n\n"
             "DOCUMENT MAP:\n"
             f"{doc_map_text}\n\n"
-            "EXCERPTS BY DOCUMENT:\n"
+            "EXCERPTS BY DOCUMENT (you MUST use these as the ONLY evidence):\n"
             f"{excerpts_text}\n\n"
-            "Write the overview and topic bullets per document. "
-            "Remember: do not guess beyond excerpts. "
-            "Always refer to documents using D# labels."
+            "Now answer using the STRICT OUTPUT FORMAT. "
+            "When you quote evidence snippets, quote from the excerpt IDs like [D1.1], [D2.2] etc."
         )
 
         messages.append({"role": "user", "content": user})
         return messages
+
+    def _build_ops_messages(
+            self,
+            *,
+            question: str,
+            ops_context: str,
+            history: Optional[List[Dict[str, str]]] = None,
+            tone: str = "neutral",
+            language: str = "en",
+    ) -> List[Dict[str, str]]:
+        tone_instruction = self.TONE_PRESETS.get(tone, self.TONE_PRESETS["neutral"])
+        lang = (language or "en").strip().lower()
+
+        system = (
+            f"Respond in {lang}. Do not switch languages unless the user asks.\n\n"
+            "You answer ONLY operational/system questions about storage, indexing, corpora, and ingestion.\n\n"
+            "GROUNDING RULES (MOST IMPORTANT):\n"
+            "- Use ONLY the provided OPERATIONAL CONTEXT.\n"
+            "- If the answer is not present, say exactly what is missing.\n"
+            "- Do NOT use IFU excerpts or clinical content.\n"
+            "- Do NOT guess.\n\n"
+            "OUTPUT:\n"
+            "- Be explicit and structured.\n"
+            "- Prefer short bullet lists.\n\n"
+            f"TONE GUIDANCE:\n{tone_instruction}"
+        )
+
+        messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
+
+        for m in (history or []):
+            role = (m.get("role") or "").strip()
+            content = (m.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+        user = (
+            f"Question:\n{question}\n\n"
+            "OPERATIONAL CONTEXT:\n"
+            f"{ops_context}\n\n"
+            "Answer using ONLY OPERATIONAL CONTEXT."
+        )
+        messages.append({"role": "user", "content": user})
+        return messages
+
 
 
 
