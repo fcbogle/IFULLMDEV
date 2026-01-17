@@ -51,13 +51,54 @@ def _get(path: str, params: Optional[dict] = None) -> Dict[str, Any]:
 
 
 def _post(path: str, payload: Dict[str, Any], params: Optional[dict] = None) -> Dict[str, Any]:
+    url = _url(path)
+
     try:
-        r = requests.post(_url(path), params=params, json=payload, timeout=TIMEOUT_SECONDS)
+        r = requests.post(
+            url,
+            params=params,
+            json=payload,
+            timeout=TIMEOUT_SECONDS,
+        )
+
+        # ---- capture HTTP metadata ----
+        http_info = {
+            "url": r.url,
+            "status_code": r.status_code,
+            "ok": r.ok,
+            "headers": dict(r.headers),
+            "text_preview": r.text[:2000],  # safety limit
+        }
+
+        # ---- parse response body safely ----
+        try:
+            data = r.json()
+        except ValueError:
+            data = {"_raw_text": r.text}
+
+        # ---- keep old behavior compatible ----
         if not r.ok:
-            return {"error": f"HTTP {r.status_code}: {r.text}"}
-        return r.json()
+            return {
+                "error": f"HTTP {r.status_code}",
+                "http": http_info,
+                "data": data,
+            }
+
+        return {
+            "http": http_info,
+            "data": data,
+        }
+
     except requests.exceptions.RequestException as e:
-        return {"error": f"RequestException: {e}"}
+        return {
+            "error": f"RequestException: {e}",
+            "http": {
+                "url": url,
+                "exception": str(e),
+            },
+            "data": None,
+        }
+
 
 
 def _delete(path: str, params: Optional[dict] = None) -> Dict[str, Any]:
@@ -529,9 +570,10 @@ def ui_reindex(container: str, doc_id: str, document_type: str) -> str:
         return json.dumps({"error": f"reindex failed: {e}"}, indent=2)
 
 
-def ui_ingest(container: str, doc_ids_text: str, document_type: str):
+def ui_ingest(container: str, doc_ids_text: str, document_type: str) -> tuple[str, str]:
     """
-    Bulk ingest returns 202 with a job_id (queued), not a completed ingested count.
+    Bulk ingest returns 202 with a job_id (queued).
+    Returns: (markdown_message, job_id)
     """
     container = (container or "").strip() or DEFAULT_CONTAINER
     document_type = (document_type or "IFU").strip() or "IFU"
@@ -540,39 +582,51 @@ def ui_ingest(container: str, doc_ids_text: str, document_type: str):
     doc_ids = [x.strip() for x in raw_ids if x.strip()]
 
     if not doc_ids:
-        return "No doc_ids provided."
+        return "No doc_ids provided.", ""
 
     payload = {"container": container, "doc_ids": doc_ids, "document_type": document_type}
 
     try:
-        out = _post("/documents/ingest", payload=payload)
+        resp = _post("/documents/ingest", payload)
 
-        job_id = out.get("job_id")
+        # New _post() shape: {"http": {...}, "data": {...}} or {"error": "...", "http": {...}, "data": ...}
+        if not isinstance(resp, dict):
+            return f"Failed: unexpected response type: {type(resp)}", ""
+
+        if resp.get("error"):
+            http = resp.get("http") or {}
+            sc = http.get("status_code")
+            extra = f" (HTTP {sc})" if sc else ""
+            return f"Failed: {resp['error']}{extra}", ""
+
+        out = resp.get("data") or {}
+        if not isinstance(out, dict):
+            return "Failed: response missing 'data' object.", ""
+
+        job_id = (out.get("job_id") or "").strip()
         status = out.get("status", "queued")
-        submitted = out.get("submitted", len(doc_ids))
+        requested = out.get("requested", len(doc_ids))
 
-        lines = [
+        msg = "\n".join([
             "### Ingest queued",
             f"- **Status:** `{status}`",
             f"- **Job ID:** `{job_id}`" if job_id else "- **Job ID:** *(not returned)*",
             f"- **Container:** `{container}`",
             f"- **Document type:** `{document_type}`",
-            f"- **Documents submitted:** **{submitted}**",
+            f"- **Documents requested:** **{requested}**",
             "",
-            "This runs in the background. Check logs (or a job status endpoint, if enabled) for progress.",
-        ]
-        return "\n".join(lines), job_id
+            "This runs in the background. Use the poll button to check job status.",
+        ])
+
+        return msg, job_id
 
     except Exception as e:
-        return f"Failed to queue ingest job: {e}"
+        return f"Failed to queue ingest job: {e}", ""
+
+
 
 
 def ui_ingest_one(container: str, doc_id: str, document_type: str) -> str:
-    """
-    Single doc ingest endpoint:
-      POST /documents/{doc_id}/ingest?container=...&document_type=...
-    Returns 202 with a job_id.
-    """
     container = (container or "").strip() or DEFAULT_CONTAINER
     doc_id = (doc_id or "").strip()
     document_type = (document_type or "IFU").strip() or "IFU"
@@ -581,30 +635,34 @@ def ui_ingest_one(container: str, doc_id: str, document_type: str) -> str:
         return "doc_id required."
 
     try:
-        out = _post(
+        resp = _post(
             f"/documents/{doc_id}/ingest",
             payload={},
             params={"container": container, "document_type": document_type},
         )
 
-        job_id = out.get("job_id")
-        status = out.get("status", "queued")
+        if not isinstance(resp, dict) or resp.get("error"):
+            return f"Failed: {resp.get('error') if isinstance(resp, dict) else 'unexpected response'}"
+
+        data = resp.get("data") or {}
+        if not isinstance(data, dict):
+            return "Failed: response missing 'data' object."
+
+        job_id = (data.get("job_id") or "").strip()
+        status = data.get("status", "queued")
 
         lines = [
-            "###Ingest queued",
+            "### Ingest queued",
             f"- **Status:** `{status}`",
             f"- **Job ID:** `{job_id}`" if job_id else "- **Job ID:** *(not returned)*",
             f"- **Container:** `{container}`",
             f"- **Document type:** `{document_type}`",
             f"- **doc_id:** `{doc_id}`",
-            "",
-            "This runs in the background. Check logs (or a job status endpoint, if enabled) for progress.",
         ]
         return "\n".join(lines)
 
     except Exception as e:
         return f"Failed to queue ingest for `{doc_id}`: {e}"
-
 
 def ui_delete_vectors(doc_id: str) -> str:
     doc_id = (doc_id or "").strip()
@@ -633,11 +691,20 @@ def ui_query(container: str, query_text: str, n_results: int, lang: str, where_j
         "include_scores": True,
         "include_metadata": True,
     }
-    out = _post("/query", payload=payload)
-    if out.get("error"):
-        return pd.DataFrame([out])
-    return pd.DataFrame(out.get("results") or [])
 
+    resp = _post("/query", payload=payload)
+
+    if not isinstance(resp, dict) or resp.get("error"):
+        return pd.DataFrame([{
+            "error": resp.get("error") if isinstance(resp, dict) else f"unexpected resp type {type(resp)}",
+            "http": resp.get("http") if isinstance(resp, dict) else None,
+        }])
+
+    data = resp.get("data") or {}
+    if not isinstance(data, dict):
+        return pd.DataFrame([{"error": "response missing data object"}])
+
+    return pd.DataFrame(data.get("results") or [])
 
 # ---------------------------
 # Chat UI functions
@@ -654,15 +721,6 @@ def ui_chat(
     api_history: List[Dict[str, str]] | None,
     tone: str,
 ) -> Tuple[List[Dict[str, str]], str, pd.DataFrame, List[Dict[str, str]]]:
-    """
-    UI chat handler.
-
-    Improvements:
-      - Adds request payload + API URL into debug output so UI vs curl mismatches are obvious.
-      - Captures server-provided HTTP debug info (if _post attaches it).
-      - Includes n_sources + n_samples + sample doc names for quick triage.
-      - Leaves sources_df as-is (but you can add a samples_df output later if you want).
-    """
     container = (container or "").strip() or DEFAULT_CONTAINER
     question = (question or "").strip()
 
@@ -689,37 +747,53 @@ def ui_chat(
         "history": api_history or None,
     }
 
-    # --- Call API ---
-    out = _post("/chat", payload=payload)
+    resp = _post("/chat", payload=payload)
 
-    # --- Error path ---
-    if out.get("error"):
-        # Try to show as much as possible in debug so you can see why UI != curl
+    # resp is now either:
+    #   {"error": "...", "http": {...}, "data": <obj>}
+    # or {"http": {...}, "data": <obj>}
+    http_info = resp.get("http")
+    data = resp.get("data")
+
+    if resp.get("error"):
         debug = json.dumps(
             {
                 "api_base_url": globals().get("API_BASE_URL", None),
                 "path": "/chat",
                 "request": payload,
-                "error": out.get("error"),
-                "http": out.get("_debug_http") or {
-                    "status_code": out.get("status_code"),
-                    "url": out.get("url"),
-                },
-                "raw_text": out.get("raw_text"),
+                "error": resp.get("error"),
+                "http": http_info,
+                "data": data,
             },
             indent=2,
         )
-
         chat_messages = chat_messages + [
             {"role": "user", "content": question},
-            {"role": "assistant", "content": out["error"]},
+            {"role": "assistant", "content": f"Error: {resp.get('error')}"},
         ]
         return chat_messages, debug, pd.DataFrame(), api_history
 
-    # --- Success path ---
-    answer = out.get("answer") or ""
-    sources = out.get("sources") or []
-    samples = out.get("samples") or []
+    if not isinstance(data, dict):
+        debug = json.dumps(
+            {
+                "api_base_url": globals().get("API_BASE_URL", None),
+                "path": "/chat",
+                "request": payload,
+                "http": http_info,
+                "data_type": str(type(data)),
+                "data": data,
+            },
+            indent=2,
+        )
+        chat_messages = chat_messages + [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": "Unexpected response shape (missing dict body)."},
+        ]
+        return chat_messages, debug, pd.DataFrame(), api_history
+
+    answer = data.get("answer") or ""
+    sources = data.get("sources") or []
+    samples = data.get("samples") or []
 
     chat_messages = chat_messages + [
         {"role": "user", "content": question},
@@ -732,31 +806,25 @@ def ui_chat(
 
     sources_df = pd.DataFrame(sources)
 
-    # Useful quick view: which docs are present in samples (inventory mode)
     sample_docs: List[str] = []
     for s in samples:
         if isinstance(s, dict):
             dn = s.get("doc_name") or s.get("doc_id")
             if dn:
                 sample_docs.append(str(dn))
-    sample_docs = sample_docs[:25]  # keep debug small
+    sample_docs = sample_docs[:25]
 
     debug = json.dumps(
         {
-            # Transport / routing checks (this is the #1 reason UI != curl)
             "api_base_url": globals().get("API_BASE_URL", None),
             "path": "/chat",
             "request": payload,
-
-            # If you upgraded _post to attach this, it’s gold for debugging
-            "http": out.get("_debug_http"),
-
-            # Response summary
+            "http": http_info,
             "response": {
-                "mode": out.get("mode"),
-                "corpus_id": out.get("corpus_id"),
-                "model": out.get("model"),
-                "usage": out.get("usage"),
+                "mode": data.get("mode"),
+                "corpus_id": data.get("corpus_id"),
+                "model": data.get("model"),
+                "usage": data.get("usage"),
                 "n_sources": len(sources),
                 "n_samples": len(samples),
                 "sample_docs_preview": sample_docs,
@@ -766,6 +834,7 @@ def ui_chat(
     )
 
     return chat_messages, debug, sources_df, api_history
+
 
 
 
@@ -984,10 +1053,13 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                 selected = selected or []
                 return "\n".join(selected)
 
-            def _ingest_bulk_from_ui(c: str, selected, typed: str, doc_type: str):
+            def _ingest_bulk_from_ui(c: str, selected, typed: str, doc_type: str) -> tuple[str, str]:
+                """
+                Gradio wrapper: selected list wins; otherwise use typed text box.
+                Returns exactly (message, job_id) to match outputs=[ingest_out, ingest_job_id].
+                """
                 selected = selected or []
                 doc_ids_text = "\n".join(selected) if selected else (typed or "")
-                # ui_ingest now returns (message, job_id)
                 return ui_ingest(c, doc_ids_text, doc_type)
 
             # -------------
@@ -1047,10 +1119,6 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                 fn=ui_ingest_one,
                 inputs=[container, single_doc_id, document_type],
                 outputs=[single_ingest_out],
-            ).then(
-                fn=_extract_job_id,
-                inputs=[single_ingest_out],
-                outputs=[single_job_id],
             )
 
             # Single poll

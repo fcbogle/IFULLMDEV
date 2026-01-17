@@ -221,8 +221,29 @@ def _resolve_mode_for_router(
     if mode_key in ("ops", "inventory", "qa"):
         return mode_key
 
-    # Use service heuristics (best), but guard if private or missing.
-    q = (question or "").strip()
+    q = (question or "").strip().lower()
+
+    # Router-side lightweight hints (helps when svc heuristics are conservative)
+    router_inventory_hints = any(t in q for t in [
+        "inventory",
+        "list indexed",
+        "which documents are indexed",
+        "documents indexed",
+        "chunk count",
+        "chunks indexed",
+        "number of chunks",
+        "how many chunks",
+        "indexed document",
+    ])
+
+    router_ops_hints = any(t in q for t in [
+        "not indexed",
+        "in storage but not indexed",
+        "indexed but not in storage",
+        "delta",
+        "blobs not indexed",
+        "storage vs index",
+    ])
 
     auto_ops = False
     auto_inventory = False
@@ -240,6 +261,18 @@ def _resolve_mode_for_router(
             auto_inventory = bool(is_inv_fn(q))
         except Exception:
             auto_inventory = False
+
+    # Combine router hints with service hints
+    auto_inventory = auto_inventory or router_inventory_hints
+    auto_ops = auto_ops or router_ops_hints
+
+    # If both match, prefer inventory when clearly per-document
+    per_doc_intent = any(p in q for p in [
+        "each document", "every document", "summary of each", "summarize each",
+        "sample chunks", "excerpts", "document map", "chunk count", "chunks indexed",
+    ])
+    if auto_ops and auto_inventory and per_doc_intent:
+        auto_ops = False
 
     if auto_ops:
         return "ops"
@@ -313,7 +346,7 @@ def post_chat(
             include_delta_lists=True,
         )
     else:
-        # Lightweight (counts only) summary can still help QA/inventory explain indexed vs stored
+        # For non-ops modes, provide a lightweight summary only (no delta lists)
         ops_context = _format_ops_context(
             stats_dict=stats_dict,
             delta_dict=None,
@@ -336,7 +369,7 @@ def post_chat(
         out: Dict[str, Any] = svc.ask(
             container=container,
             corpus_id=effective_corpus,
-            mode=mode_key,  # keep original; svc still does its own resolution
+            mode=resolved_mode,  # ✅ IMPORTANT: enforce router resolution
             question=question,
             n_results=req.n_results,
             where=req.where,

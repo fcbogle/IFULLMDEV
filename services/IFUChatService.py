@@ -215,21 +215,21 @@ class IFUChatService:
     # Main entry point
     # ----------------------------
     def ask(
-        self,
-        *,
-        container: str = "ifu-docs-test",
-        corpus_id: Optional[str] = None,
-        mode: Optional[str] = None,
-        question: str,
-        n_results: int = 5,
-        where: Optional[Dict[str, Any]] = None,
-        temperature: float = 0.0,
-        max_tokens: int = 512,
-        history: Optional[List[Dict[str, str]]] = None,
-        tone: str = "neutral",
-        language: str = "en",
-        stats_context: Optional[str] = None,
-        ops_context: Optional[str] = None,
+            self,
+            *,
+            container: str = "ifu-docs-test",
+            corpus_id: Optional[str] = None,
+            mode: Optional[str] = None,
+            question: str,
+            n_results: int = 5,
+            where: Optional[Dict[str, Any]] = None,
+            temperature: float = 0.0,
+            max_tokens: int = 512,
+            history: Optional[List[Dict[str, str]]] = None,
+            tone: str = "neutral",
+            language: str = "en",
+            stats_context: Optional[str] = None,
+            ops_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         q = (question or "").strip()
         if not q:
@@ -267,6 +267,8 @@ class IFUChatService:
         force_qa = mode_key == "qa"
         force_ops = mode_key == "ops"
 
+        ql = q.lower()
+
         if force_ops:
             resolved_mode = "ops"
             auto_ops = auto_inventory = False
@@ -277,12 +279,14 @@ class IFUChatService:
             resolved_mode = "qa"
             auto_ops = auto_inventory = False
         else:
-            auto_inventory = self._is_inventory_question(q)
-            auto_ops = self._is_ops_question(q)
+            auto_inventory = bool(self._is_inventory_question(ql))
+            auto_ops = bool(self._is_ops_question(ql))
 
-            # If both match, prefer inventory when the intent is clearly per-document / excerpts
-            ql = q.lower()
             per_doc_intent = any(p in ql for p in [
+                "inventory",
+                "list indexed",
+                "which documents are indexed",
+                "indexed document",
                 "each document",
                 "every document",
                 "focuses on",
@@ -292,14 +296,24 @@ class IFUChatService:
                 "sample chunks",
                 "excerpts",
                 "document map",
+                "chunk count",
+                "chunks indexed",
+                "number of chunks",
+                "how many chunks",
                 "d1",
                 "d2",
             ])
+
+            # If both match, prefer inventory for per-document intent
             if auto_ops and auto_inventory and per_doc_intent:
                 auto_ops = False
 
             # priority: ops > inventory > qa
             resolved_mode = "ops" if auto_ops else ("inventory" if auto_inventory else "qa")
+
+            # Guard: if the question is clearly inventory, DO NOT fall through to QA
+            if resolved_mode == "qa" and per_doc_intent:
+                resolved_mode = "inventory"
 
         self.logger.info(
             "ask: mode_resolved=%s (mode_key=%r force_ops=%s force_inventory=%s force_qa=%s auto_ops=%s auto_inventory=%s)",
@@ -318,6 +332,16 @@ class IFUChatService:
         if resolved_mode == "inventory":
             lang_filter = (lang or "").strip().lower() or None
 
+            # 1) Get doc-level stats (this is where chunk_count lives)
+            stats = self.stats_service.get_stats(
+                blob_container=blob_container,
+                corpus_id=effective_corpus,
+            )
+            stats_dict = stats.model_dump() if hasattr(stats, "model_dump") else stats
+            docs = (stats_dict.get("documents") or [])
+
+            # Optional: keep samples for “describe each doc” questions
+            lang_filter = (lang or "").strip().lower() or None
             samples = self.stats_service.get_indexed_doc_samples(
                 blob_container=blob_container,
                 corpus_id=effective_corpus,
@@ -329,6 +353,7 @@ class IFUChatService:
 
             messages = self._build_inventory_messages(
                 question=q,
+                documents=docs,
                 samples=samples,
                 history=history,
                 tone=tone_key,
@@ -604,42 +629,95 @@ class IFUChatService:
         messages.append({"role": "user", "content": user})
         return messages
 
+    from typing import Any, Dict, List, Optional
+
     def _build_inventory_messages(
-        self,
-        *,
-        question: str,
-        samples: List[Dict[str, Any]],
-        history: Optional[List[Dict[str, str]]] = None,
-        tone: str = "neutral",
-        language: str = "en",
+            self,
+            *,
+            question: str,
+            samples: List[Dict[str, Any]],
+            documents: Optional[List[Dict[str, Any]]] = None,
+            history: Optional[List[Dict[str, str]]] = None,
+            tone: str = "neutral",
+            language: str = "en",
     ) -> List[Dict[str, str]]:
+        """
+        INVENTORY mode messages.
+
+        Supports two inventory sub-modes:
+          A) Inventory/counts (uses doc-level stats from `documents`)
+          B) Content overview per doc (uses excerpt samples only, as before)
+
+        `documents` should come from stats_service.get_stats(...).documents
+        and include fields like doc_id, doc_name, chunk_count, page_count, etc.
+        """
         tone_instruction = self.TONE_PRESETS.get(tone, self.TONE_PRESETS["neutral"])
         lang = (language or "en").strip().lower()
+        ql = (question or "").strip().lower()
 
-        system = (
-            f"Respond in {lang}. Do not switch languages unless the user asks.\n\n"
-            "You are helping the user understand what indexed IFU documents cover using ONLY the excerpts provided.\n\n"
-            "HARD RULES (MOST IMPORTANT):\n"
-            "- You MUST ground every statement in the provided excerpts.\n"
-            "- Do NOT guess, do NOT generalise from typical IFU structure.\n"
-            "- If an excerpt does not show something, say: 'Not shown in the excerpts.'\n"
-            "- If a document has no excerpts, say: 'No excerpts returned for this document (filter too strict or no data).'\n\n"
-            "D# DOCUMENT LABELS (IMPORTANT):\n"
-            "- Each document has a label D1, D2, D3... (DOCUMENT MAP).\n"
-            "- ALWAYS refer to documents using their D# label in your answer.\n"
-            "- You may include the filename, but always include D#.\n"
-            "- Do NOT mention any document not in the DOCUMENT MAP.\n\n"
-            "OUTPUT FORMAT (STRICT):\n"
-            "1) DOCUMENT MAP: one line per doc.\n"
-            "2) FOR EACH DOCUMENT:\n"
-            "   - Title line: D# — filename\n"
-            "   - 'What the excerpts show' (1–2 sentences)\n"
-            "   - 'Key topics visible' (3–6 bullets)\n"
-            "   - 'Evidence snippets' (quote 1–3 short verbatim snippets from the excerpts)\n\n"
-            "REGULATORY SAFETY:\n"
-            "- Do not provide medical advice beyond what is shown.\n\n"
-            f"TONE GUIDANCE:\n{tone_instruction}"
-        )
+        # Heuristic: treat as "counts/inventory" when the user asks for a list of docs + counts.
+        wants_counts = any(k in ql for k in [
+            "inventory",
+            "indexed document inventory",
+            "list each indexed",
+            "list indexed",
+            "which documents are indexed",
+            "which docs are indexed",
+            "chunk count",
+            "chunk_count",
+            "number of chunks",
+            "how many chunks",
+            "page count",
+            "page_count",
+            "how many pages",
+            "count of documents",
+            "document count",
+        ])
+
+        # ----------------------------
+        # System prompt
+        # ----------------------------
+        if wants_counts:
+            system = (
+                f"Respond in {lang}. Do not switch languages unless the user asks.\n\n"
+                "You are in INVENTORY mode.\n"
+                "You may use ONLY the DOCUMENT INVENTORY STATS provided below (doc-level facts).\n\n"
+                "HARD RULES (MOST IMPORTANT):\n"
+                "- Use ONLY the provided document inventory stats.\n"
+                "- Do NOT infer or guess missing counts.\n"
+                "- If a count is missing for a document, output 'unknown' for that field.\n"
+                "- Do NOT use excerpts to derive counts.\n\n"
+                "OUTPUT FORMAT (STRICT):\n"
+                "1) INDEXED DOCUMENT INVENTORY:\n"
+                "   - One line per doc: <doc_id or filename> | chunk_count=<n/unknown> | page_count=<n/unknown>\n\n"
+                f"TONE GUIDANCE:\n{tone_instruction}"
+            )
+        else:
+            # Original excerpts-only strict mode
+            system = (
+                f"Respond in {lang}. Do not switch languages unless the user asks.\n\n"
+                "You are helping the user understand what indexed IFU documents cover using ONLY the excerpts provided.\n\n"
+                "HARD RULES (MOST IMPORTANT):\n"
+                "- You MUST ground every statement in the provided excerpts.\n"
+                "- Do NOT guess, do NOT generalise from typical IFU structure.\n"
+                "- If an excerpt does not show something, say: 'Not shown in the excerpts.'\n"
+                "- If a document has no excerpts, say: 'No excerpts returned for this document (filter too strict or no data).'\n\n"
+                "D# DOCUMENT LABELS (IMPORTANT):\n"
+                "- Each document has a label D1, D2, D3... (DOCUMENT MAP).\n"
+                "- ALWAYS refer to documents using their D# label in your answer.\n"
+                "- You may include the filename, but always include D#.\n"
+                "- Do NOT mention any document not in the DOCUMENT MAP.\n\n"
+                "OUTPUT FORMAT (STRICT):\n"
+                "1) DOCUMENT MAP: one line per doc.\n"
+                "2) FOR EACH DOCUMENT:\n"
+                "   - Title line: D# — filename\n"
+                "   - 'What the excerpts show' (1–2 sentences)\n"
+                "   - 'Key topics visible' (3–6 bullets)\n"
+                "   - 'Evidence snippets' (quote 1–3 short verbatim snippets from the excerpts)\n\n"
+                "REGULATORY SAFETY:\n"
+                "- Do not provide medical advice beyond what is shown.\n\n"
+                f"TONE GUIDANCE:\n{tone_instruction}"
+            )
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": system}]
 
@@ -649,6 +727,40 @@ class IFUChatService:
             if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": content})
 
+        # ----------------------------
+        # User prompt
+        # ----------------------------
+        if wants_counts:
+            docs = documents or []
+
+            # Build inventory lines
+            inv_lines: List[str] = []
+            for d in docs:
+                if not isinstance(d, dict):
+                    continue
+                doc_name = d.get("doc_id") or d.get("doc_name") or d.get("filename") or "Unknown"
+                chunk_count = d.get("chunk_count")
+                page_count = d.get("page_count")
+
+                cc = str(chunk_count) if isinstance(chunk_count, int) else "unknown"
+                pc = str(page_count) if isinstance(page_count, int) else "unknown"
+
+                inv_lines.append(f"- {doc_name} | chunk_count={cc} | page_count={pc}")
+
+            inv_text = "\n".join(inv_lines).strip() if inv_lines else "- [no indexed documents returned]"
+
+            user = (
+                f"Question:\n{question}\n\n"
+                "DOCUMENT INVENTORY STATS (doc-level; use ONLY these):\n"
+                f"{inv_text}\n\n"
+                "Now answer using the STRICT OUTPUT FORMAT."
+            )
+            messages.append({"role": "user", "content": user})
+            return messages
+
+        # ----------------------------
+        # Original excerpts-per-doc path
+        # ----------------------------
         doc_map_lines: List[str] = []
         excerpt_blocks: List[str] = []
 
