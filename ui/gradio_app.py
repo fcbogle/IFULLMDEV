@@ -654,6 +654,15 @@ def ui_chat(
     api_history: List[Dict[str, str]] | None,
     tone: str,
 ) -> Tuple[List[Dict[str, str]], str, pd.DataFrame, List[Dict[str, str]]]:
+    """
+    UI chat handler.
+
+    Improvements:
+      - Adds request payload + API URL into debug output so UI vs curl mismatches are obvious.
+      - Captures server-provided HTTP debug info (if _post attaches it).
+      - Includes n_sources + n_samples + sample doc names for quick triage.
+      - Leaves sources_df as-is (but you can add a samples_df output later if you want).
+    """
     container = (container or "").strip() or DEFAULT_CONTAINER
     question = (question or "").strip()
 
@@ -668,7 +677,7 @@ def ui_chat(
         chat_messages = chat_messages + [{"role": "assistant", "content": err}]
         return chat_messages, "", pd.DataFrame(), api_history
 
-    payload = {
+    payload: Dict[str, Any] = {
         "container": container,
         "question": question,
         "n_results": int(n_results),
@@ -680,16 +689,37 @@ def ui_chat(
         "history": api_history or None,
     }
 
+    # --- Call API ---
     out = _post("/chat", payload=payload)
+
+    # --- Error path ---
     if out.get("error"):
+        # Try to show as much as possible in debug so you can see why UI != curl
+        debug = json.dumps(
+            {
+                "api_base_url": globals().get("API_BASE_URL", None),
+                "path": "/chat",
+                "request": payload,
+                "error": out.get("error"),
+                "http": out.get("_debug_http") or {
+                    "status_code": out.get("status_code"),
+                    "url": out.get("url"),
+                },
+                "raw_text": out.get("raw_text"),
+            },
+            indent=2,
+        )
+
         chat_messages = chat_messages + [
             {"role": "user", "content": question},
             {"role": "assistant", "content": out["error"]},
         ]
-        return chat_messages, "", pd.DataFrame(), api_history
+        return chat_messages, debug, pd.DataFrame(), api_history
 
+    # --- Success path ---
     answer = out.get("answer") or ""
     sources = out.get("sources") or []
+    samples = out.get("samples") or []
 
     chat_messages = chat_messages + [
         {"role": "user", "content": question},
@@ -701,19 +731,42 @@ def ui_chat(
     ]
 
     sources_df = pd.DataFrame(sources)
+
+    # Useful quick view: which docs are present in samples (inventory mode)
+    sample_docs: List[str] = []
+    for s in samples:
+        if isinstance(s, dict):
+            dn = s.get("doc_name") or s.get("doc_id")
+            if dn:
+                sample_docs.append(str(dn))
+    sample_docs = sample_docs[:25]  # keep debug small
+
     debug = json.dumps(
         {
-            "mode": out.get("mode"),
-            "corpus_id": out.get("corpus_id"),
-            "model": out.get("model"),
-            "usage": out.get("usage"),
-            "n_sources": len(sources),
-            "n_samples": len(out.get("samples") or []),
+            # Transport / routing checks (this is the #1 reason UI != curl)
+            "api_base_url": globals().get("API_BASE_URL", None),
+            "path": "/chat",
+            "request": payload,
+
+            # If you upgraded _post to attach this, it’s gold for debugging
+            "http": out.get("_debug_http"),
+
+            # Response summary
+            "response": {
+                "mode": out.get("mode"),
+                "corpus_id": out.get("corpus_id"),
+                "model": out.get("model"),
+                "usage": out.get("usage"),
+                "n_sources": len(sources),
+                "n_samples": len(samples),
+                "sample_docs_preview": sample_docs,
+            },
         },
         indent=2,
     )
 
     return chat_messages, debug, sources_df, api_history
+
 
 
 # ---------------------------
