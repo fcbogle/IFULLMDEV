@@ -720,20 +720,41 @@ def ui_chat(
     chat_messages: List[Dict[str, str]] | None,
     api_history: List[Dict[str, str]] | None,
     tone: str,
-) -> Tuple[List[Dict[str, str]], str, pd.DataFrame, List[Dict[str, str]]]:
+) -> Tuple[List[Dict[str, str]], str, pd.DataFrame, List[Dict[str, str]], str]:
     container = (container or "").strip() or DEFAULT_CONTAINER
     question = (question or "").strip()
 
     chat_messages = chat_messages or []
     api_history = api_history or []
 
+    # Default mode display
+    mode_md = "**Mode:** `—`"
+
     if not question:
-        return chat_messages, "", pd.DataFrame(), api_history
+        return chat_messages, "", pd.DataFrame(), api_history, mode_md
 
     where, err = _build_where(container=container, lang=lang, where_json=where_json)
     if err:
+        debug = json.dumps(
+            {
+                "api_base_url": globals().get("API_BASE_URL", None),
+                "path": "/chat",
+                "request": {
+                    "container": container,
+                    "question": question,
+                    "n_results": int(n_results),
+                    "where_json": where_json,
+                    "tone": tone,
+                    "language": lang,
+                    "temperature": float(temperature),
+                    "max_tokens": int(max_tokens),
+                },
+                "error": err,
+            },
+            indent=2,
+        )
         chat_messages = chat_messages + [{"role": "assistant", "content": err}]
-        return chat_messages, "", pd.DataFrame(), api_history
+        return chat_messages, debug, pd.DataFrame(), api_history, "**Mode:** `error`"
 
     payload: Dict[str, Any] = {
         "container": container,
@@ -769,9 +790,9 @@ def ui_chat(
         )
         chat_messages = chat_messages + [
             {"role": "user", "content": question},
-            {"role": "assistant", "content": f"Error: {resp.get('error')}"},
+            {"role": "assistant", "content": f"{resp.get('error')}"},
         ]
-        return chat_messages, debug, pd.DataFrame(), api_history
+        return chat_messages, debug, pd.DataFrame(), api_history, "**Mode:** `error`"
 
     if not isinstance(data, dict):
         debug = json.dumps(
@@ -789,9 +810,13 @@ def ui_chat(
             {"role": "user", "content": question},
             {"role": "assistant", "content": "Unexpected response shape (missing dict body)."},
         ]
-        return chat_messages, debug, pd.DataFrame(), api_history
+        return chat_messages, debug, pd.DataFrame(), api_history, "**Mode:** `error`"
 
-    answer = data.get("answer") or ""
+    # ---- SUCCESS PATH ----
+    mode = (data.get("mode") or "qa").strip().lower()
+    mode_md = f"**Mode:** `{mode}`"
+
+    answer = (data.get("answer") or "").strip()
     sources = data.get("sources") or []
     samples = data.get("samples") or []
 
@@ -807,11 +832,12 @@ def ui_chat(
     sources_df = pd.DataFrame(sources)
 
     sample_docs: List[str] = []
-    for s in samples:
-        if isinstance(s, dict):
-            dn = s.get("doc_name") or s.get("doc_id")
-            if dn:
-                sample_docs.append(str(dn))
+    if isinstance(samples, list):
+        for s in samples:
+            if isinstance(s, dict):
+                dn = s.get("doc_name") or s.get("doc_id")
+                if dn:
+                    sample_docs.append(str(dn))
     sample_docs = sample_docs[:25]
 
     debug = json.dumps(
@@ -825,15 +851,16 @@ def ui_chat(
                 "corpus_id": data.get("corpus_id"),
                 "model": data.get("model"),
                 "usage": data.get("usage"),
-                "n_sources": len(sources),
-                "n_samples": len(samples),
+                "n_sources": len(sources) if isinstance(sources, list) else 0,
+                "n_samples": len(samples) if isinstance(samples, list) else 0,
                 "sample_docs_preview": sample_docs,
             },
         },
         indent=2,
     )
 
-    return chat_messages, debug, sources_df, api_history
+    return chat_messages, debug, sources_df, api_history, mode_md
+
 
 
 
@@ -1185,6 +1212,8 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
             question = gr.Textbox(label="Question", placeholder="Ask something about the IFU…")
             send_btn = gr.Button("Send")
 
+            chat_mode = gr.Markdown(value="**Mode:** `—`")
+
             chat_debug = gr.Code(label="Chat debug (model/usage)", language="json")
             sources_df = gr.Dataframe(label="Sources", interactive=False)
 
@@ -1194,7 +1223,7 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                     c_container,
                     question,
                     c_n,
-                    c_lang,   # lang dropdown
+                    c_lang,
                     c_where,
                     c_temp,
                     c_max,
@@ -1202,7 +1231,7 @@ def build_gradio_app(api_base_url: str = API_BASE_URL) -> gr.Blocks:
                     chat_api_state,
                     c_tone,
                 ],
-                outputs=[chatbot, chat_debug, sources_df, chat_api_state],
+                outputs=[chatbot, chat_debug, sources_df, chat_api_state, chat_mode],
             ).then(
                 fn=lambda chat_value: chat_value,
                 inputs=[chatbot],
