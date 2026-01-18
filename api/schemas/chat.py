@@ -8,11 +8,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
-from api.schemas.query import QueryHit
+from settings import BLOB_CONTAINER_DEFAULT
 
 
 class ChatRequest(BaseModel):
-    container: str = Field("ifu-docs-test", min_length=1)
+    container: str = Field(BLOB_CONTAINER_DEFAULT, min_length=1)
     corpus_id: Optional[str] = None
     mode: Optional[str] = None
     question: str = Field(..., min_length=1)
