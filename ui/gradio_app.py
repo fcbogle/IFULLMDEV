@@ -17,13 +17,15 @@ import requests
 
 from utility.assets import img_to_data_uri
 
+from settings import BLOB_CONTAINER_DEFAULT
+
 # Environment configuration
 API_BASE_URL = os.getenv("IFU_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 LOG_FILE = os.getenv("IFU_LOG_FILE", "./logs/ifullmdev.log")
 LOG_TAIL_LINES = int(os.getenv("IFU_UI_LOG_TAIL_LINES", "400"))
 TIMEOUT_SECONDS = int(os.getenv("IFU_UI_TIMEOUT_SECONDS", "300"))
 
-DEFAULT_CONTAINER = os.getenv("IFU_DEFAULT_CONTAINER", "ifu-docs-test")
+DEFAULT_CONTAINER = BLOB_CONTAINER_DEFAULT
 
 # If your chunk metadata includes "container", you can enable this
 # to constrain retrieval automatically.
@@ -860,10 +862,6 @@ def ui_chat(
     )
 
     return chat_messages, debug, sources_df, api_history, mode_md
-
-
-
-
 
 # ---------------------------
 # Build Gradio UI

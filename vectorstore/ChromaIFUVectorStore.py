@@ -1,6 +1,7 @@
 # -----------------------------------------------------------------------------
 # Author: Frank Campbell Bogle
 # Created: 2025-11-16
+# Updated: 2026-01-18
 # Description: ChromaIFUVectorStore
 # -----------------------------------------------------------------------------
 import time
@@ -17,22 +18,41 @@ from embedding.IFUEmbedder import EmbeddingRecord, IFUEmbedder
 from utility.logging_utils import get_class_logger
 from vectorstore.IFUVectorStore import IFUVectorStore
 
-from settings import ACTIVE_CORPUS_ID
+from settings import ACTIVE_CORPUS_ID, VECTOR_COLLECTION_DEFAULT
 
 
 @dataclass(kw_only=True)
 class ChromaIFUVectorStore(IFUVectorStore):
+    """
+    Chroma Cloud-backed vector store.
+
+    Backwards compatible:
+    - `self.collection` remains the default collection created at init.
+    - Existing methods continue to operate against the default collection.
+
+    New capabilities:
+    - `get_collection(name)` returns collection by name (cached).
+    - `query(collection=..., ...)` used by IFUQueryService to support per-request collection selection.
+    """
     cfg: Config
     embedder: IFUEmbedder
-    collection_name: str = "ifu-docs-test"
+    collection_name: str = VECTOR_COLLECTION_DEFAULT
     logger: Any = None
+
+    # Lazy cache of collections by name (supports multi-collection usage)
+    _collections_cache: Optional[Dict[str, Collection]] = None
 
     def __post_init__(self) -> None:
         self.logger = self.logger or get_class_logger(self.__class__)
 
+        self.collection_name = (self.collection_name or VECTOR_COLLECTION_DEFAULT).strip()
+        if not self.collection_name:
+            raise RuntimeError("ChromaIFUVectorStore.collection_name resolved to empty value")
+
         self.logger.info(
-            "Initialising Chroma Cloud client "
-            f"(tenant={self.cfg.chroma_tenant}, database={self.cfg.chroma_database})"
+            "Initialising Chroma Cloud client (tenant=%s, database=%s)",
+            self.cfg.chroma_tenant,
+            self.cfg.chroma_database,
         )
 
         self.client: ClientAPI = chromadb.CloudClient(
@@ -41,9 +61,14 @@ class ChromaIFUVectorStore(IFUVectorStore):
             api_key=self.cfg.chroma_api_key,
         )
 
+        # Default collection (backwards compatibility)
         self.collection: Collection = self.client.get_or_create_collection(
             name=self.collection_name
         )
+
+        # Seed cache with default collection
+        self._collections_cache = {self.collection_name: self.collection}
+
         self.logger.info(
             "Chroma collection ready: '%s' (tenant=%s, db=%s)",
             self.collection_name,
@@ -51,12 +76,70 @@ class ChromaIFUVectorStore(IFUVectorStore):
             self.cfg.chroma_database,
         )
 
+    # -------------------------------------------------------------------------
+    # New: multi-collection support
+    # -------------------------------------------------------------------------
+    def get_collection(self, name: Optional[str] = None) -> Collection:
+        """
+        Resolve a Chroma collection by name (get-or-create).
+        If name is None/empty, returns the default collection created at init.
+        """
+        if not name or not str(name).strip():
+            return self.collection
+
+        col_name = str(name).strip()
+
+        if self._collections_cache is None:
+            self._collections_cache = {}
+
+        cached = self._collections_cache.get(col_name)
+        if cached is not None:
+            return cached
+
+        col = self.client.get_or_create_collection(name=col_name)
+        self._collections_cache[col_name] = col
+        return col
+
+    def query(
+            self,
+            *,
+            collection: Optional[str] = None,
+            query_text: str,
+            n_results: int = 5,
+            where: Dict[str, Any] | None = None,
+            include: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Query a Chroma collection using *local embeddings* (embedder),
+        ensuring embedding dimension matches what you ingested.
+
+        Returns raw Chroma query output: ids, documents, metadatas, distances
+        """
+        q = (query_text or "").strip()
+        if not q:
+            raise ValueError("query_text must not be empty")
+
+        col = self.get_collection(collection)
+        inc = include or ["documents", "metadatas", "distances"]
+
+        # Embed locally to guarantee consistent dimensionality
+        query_vectors = self.embedder.embed_texts([q])
+
+        return col.query(
+            query_embeddings=query_vectors,
+            n_results=int(n_results),
+            where=where,
+            include=inc,
+        )
+
+    # -------------------------------------------------------------------------
+    # Existing functionality
+    # -------------------------------------------------------------------------
     def test_connection(self) -> bool:
         """
         Simple health check: can we talk to Chroma and our collection?
         """
         try:
-            # count() is cheap and exercises the connection + auth
             _ = self.collection.count()
             return True
         except Exception as e:
@@ -69,12 +152,20 @@ class ChromaIFUVectorStore(IFUVectorStore):
             chunks: Sequence[IFUChunk],
             records: Sequence[EmbeddingRecord],
             *,
-            corpus_id: str
+            corpus_id: str | None = None,
+            collection: Optional[str] = None,
     ) -> None:
+        """
+        Upsert embeddings into Chroma.
+
+        Backwards compatible: if `collection` is None, uses default `self.collection`.
+        """
         if len(chunks) != len(records):
             raise ValueError(
                 f"chunks ({len(chunks)}) and records ({len(records)}) length mismatch"
             )
+
+        col = self.get_collection(collection)
 
         ids: List[str] = []
         documents: List[str] = []
@@ -100,8 +191,7 @@ class ChromaIFUVectorStore(IFUVectorStore):
             meta.setdefault("doc_name", chunk.doc_name)
 
             # Fill corpus_id for accurate context and queries
-            meta.setdefault("corpus_id", corpus_id)
-
+            meta.setdefault("corpus_id", corpus_id or ACTIVE_CORPUS_ID)
 
             # Helpful aliases (pick one display field and keep it consistent)
             meta.setdefault("file_name", chunk.doc_name)
@@ -125,21 +215,21 @@ class ChromaIFUVectorStore(IFUVectorStore):
             embeddings.append(vec)
             metadatas.append(meta)
 
-        # Optional: log a sample to verify page_count shows up
         if metadatas:
             self.logger.info("Sample metadata sent to Chroma: %r", metadatas[0])
 
-        self.collection.upsert(
+        col.upsert(
             ids=ids,
             documents=documents,
             embeddings=embeddings,
             metadatas=metadatas,
         )
+
         self.logger.info(
             "Upserted %d chunks for doc_id '%s' into Chroma collection '%s'",
             len(chunks),
             doc_id,
-            self.collection_name,
+            (collection or self.collection_name),
         )
 
     def query_text(
@@ -147,11 +237,19 @@ class ChromaIFUVectorStore(IFUVectorStore):
             query_text: str,
             n_results: int = 5,
             where: Dict[str, Any] | None = None,
+            *,
+            collection: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """
+        Backwards compatible wrapper around the new query() API.
+        Uses text embeddings (existing approach) and supports collection selection.
 
+        NOTE: Your IFUQueryService now uses ChromaIFUVectorStore.query(...),
+        but other parts of the code may still call query_text().
+        """
         self.logger.info(
             "Querying Chroma collection '%s' with query=%r (n_results=%d, where=%s)",
-            self.collection_name,
+            (collection or self.collection_name),
             query_text,
             n_results,
             where,
@@ -182,8 +280,10 @@ class ChromaIFUVectorStore(IFUVectorStore):
                 self.logger.debug("Applying metadata filter (where=%s)", chroma_where)
                 query_kwargs["where"] = chroma_where
 
-            self.logger.debug("Issuing Chroma query against collection '%s'", self.collection_name)
-            res = self.collection.query(**query_kwargs)
+            col = self.get_collection(collection)
+
+            self.logger.debug("Issuing Chroma query against collection '%s'", (collection or self.collection_name))
+            res = col.query(**query_kwargs)
 
             ids = res.get("ids") or [[]]
             returned = len(ids[0]) if ids and isinstance(ids[0], list) else len(ids)
@@ -205,11 +305,9 @@ class ChromaIFUVectorStore(IFUVectorStore):
         if ids is None:
             return []
 
-        # already flat: ["a","b"]
         if isinstance(ids, list) and (not ids or isinstance(ids[0], str)):
             return [x for x in ids if isinstance(x, str)]
 
-        # nested: [["a","b"], ["c"]]
         if isinstance(ids, list):
             out: List[str] = []
             for item in ids:
@@ -224,7 +322,6 @@ class ChromaIFUVectorStore(IFUVectorStore):
     def delete_by_doc_id(self, doc_id: str) -> int:
         self.logger.info("delete_by_doc_id: doc_id='%s' (start)", doc_id)
 
-        # get ids for doc_id
         res: Dict[str, Any] = self.collection.get(
             where={"doc_id": {"$eq": doc_id}},
             include=[],
@@ -241,10 +338,8 @@ class ChromaIFUVectorStore(IFUVectorStore):
             doc_id, len(ids), len(unique_ids)
         )
 
-        # delete ids
         self.collection.delete(ids=unique_ids)
 
-        # poll until gone (handles eventual consistency)
         max_wait_s = 3.0
         deadline = time.time() + max_wait_s
         while time.time() < deadline:
@@ -258,12 +353,12 @@ class ChromaIFUVectorStore(IFUVectorStore):
                 return len(unique_ids)
             time.sleep(0.2)
 
-        # if still visible, log it (but still return deleted count)
         self.logger.warning(
             "delete_by_doc_id: doc_id='%s' delete issued, but %d ids still visible after %.1fs (eventual consistency?)",
             doc_id, len(remaining), max_wait_s
         )
         return len(unique_ids)
+
     def list_documents(self, *, limit: int = 1000) -> List[Dict[str, Any]]:
         """
         Return a list of documents present in this collection,
@@ -271,18 +366,10 @@ class ChromaIFUVectorStore(IFUVectorStore):
 
         We page through Chroma in batches (max 300 per request) so we
         don't hit the 'Limit value' quota and still see all chunks.
-
-        Each entry:
-            {
-              "doc_id": "BMK2IFU.pdf",
-              "chunk_count": 289,
-              "page_count": 164
-            }
         """
         if not self.collection:
             return []
 
-        # Chroma Cloud quota: per-request limit <= 300
         page_size = 300
 
         counts = Counter()
@@ -294,7 +381,6 @@ class ChromaIFUVectorStore(IFUVectorStore):
         seen = 0
 
         while seen < limit:
-            # Don't ask for more than remaining "limit" overall
             batch_limit = min(page_size, limit - seen)
             if batch_limit <= 0:
                 break
@@ -307,9 +393,8 @@ class ChromaIFUVectorStore(IFUVectorStore):
 
             metadatas = resp.get("metadatas") or []
             if not metadatas:
-                break  # no more data
+                break
 
-            # Log a sample on first page for debugging
             if offset == 0 and metadatas:
                 self.logger.info("list_documents sample md: %r", metadatas[0])
 
@@ -321,10 +406,8 @@ class ChromaIFUVectorStore(IFUVectorStore):
                 if not doc_id:
                     continue
 
-                # Increment chunk count
                 counts[doc_id] += 1
 
-                # Capture page_count once per doc_id (if present)
                 pc_raw = md.get("page_count")
                 if pc_raw is not None and doc_id not in page_counts:
                     try:
@@ -332,12 +415,10 @@ class ChromaIFUVectorStore(IFUVectorStore):
                     except (TypeError, ValueError):
                         pass
 
-                # document_type (new)
                 dt = md.get("document_type")
                 if isinstance(dt, str) and dt.strip() and doc_id not in doc_types:
                     doc_types[doc_id] = dt.strip()
 
-                # last_modified (new) - keep ISO string
                 lm = md.get("last_modified")
                 if isinstance(lm, str) and lm.strip() and doc_id not in last_modifieds:
                     last_modifieds[doc_id] = lm.strip()
@@ -346,7 +427,6 @@ class ChromaIFUVectorStore(IFUVectorStore):
             seen += batch_len
             offset += batch_len
 
-            # If we got fewer items than requested, we've exhausted the collection
             if batch_len < batch_limit:
                 break
 
@@ -365,7 +445,6 @@ class ChromaIFUVectorStore(IFUVectorStore):
         self.logger.info("list_documents docs summary: %r", docs[:2])
         return docs
 
-    # helper method for returning sample chunks for chatbot context
     def _as_chroma_where(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         if not filters:
             return {}
@@ -382,6 +461,7 @@ class ChromaIFUVectorStore(IFUVectorStore):
             lang: Optional[str] = None,
             max_chunks: int = 5,
             max_chars_per_chunk: int = 2000,
+            collection: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fetch a small, deterministic sample of chunks for a given doc_id.
@@ -390,9 +470,6 @@ class ChromaIFUVectorStore(IFUVectorStore):
           - corpus_id (defaults to ACTIVE_CORPUS_ID)
           - optional container
           - optional lang (e.g., "en", "pt", "de")
-
-        Ordering:
-          - sorted by chunk_index (if present) for determinism
         """
         corpus = corpus_id or ACTIVE_CORPUS_ID
         lang_norm = (lang or "").strip().lower() or None
@@ -405,7 +482,8 @@ class ChromaIFUVectorStore(IFUVectorStore):
 
         where = self._as_chroma_where(filters)
 
-        res = self.collection.get(where=where, include=["documents", "metadatas"])
+        col = self.get_collection(collection)
+        res = col.get(where=where, include=["documents", "metadatas"])
         docs: List[str] = res.get("documents") or []
         metas: List[Dict[str, Any]] = res.get("metadatas") or []
 
@@ -442,4 +520,3 @@ class ChromaIFUVectorStore(IFUVectorStore):
             )
 
         return out
-

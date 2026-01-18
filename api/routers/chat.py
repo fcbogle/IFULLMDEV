@@ -15,7 +15,7 @@ from api.schemas.chat import ChatResponse, ChatRequest, ChatSource
 from services.IFUChatService import IFUChatService
 from services.IFUStatsService import IFUStatsService
 
-from settings import ACTIVE_CORPUS_ID, BLOB_CONTAINER_DEFAULT
+from settings import ACTIVE_CORPUS_ID, BLOB_CONTAINER_DEFAULT, VECTOR_COLLECTION_DEFAULT
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -40,6 +40,27 @@ def _extract_container_from_where(where: Optional[Dict[str, Any]]) -> Optional[s
 
     return None
 
+def _extract_vector_collection_from_where(where: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not where or not isinstance(where, dict):
+        return None
+
+    # new preferred key
+    vc = where.get("vector_collection")
+    if isinstance(vc, str) and vc.strip():
+        return vc.strip()
+
+    # some people may put it under "collection"
+    col = where.get("collection")
+    if isinstance(col, str) and col.strip():
+        return col.strip()
+
+    metadata = where.get("metadata")
+    if isinstance(metadata, dict):
+        md_vc = metadata.get("vector_collection") or metadata.get("collection")
+        if isinstance(md_vc, str) and md_vc.strip():
+            return md_vc.strip()
+
+    return None
 
 def _as_dict(obj: Any) -> Dict[str, Any]:
     if obj is None:
@@ -290,8 +311,29 @@ def post_chat(
     if not question:
         raise HTTPException(status_code=400, detail="question must not be empty")
 
-    container = _extract_container_from_where(req.where) or getattr(req, "container", None) or BLOB_CONTAINER_DEFAULT
-    effective_corpus = getattr(req, "corpus_id", None) or ACTIVE_CORPUS_ID
+    # ----------------------------
+    # Resolve blob_container vs vector_collection
+    # ----------------------------
+    blob_container = (
+        _extract_container_from_where(req.where)
+        or getattr(req, "blob_container", None)
+        or getattr(req, "container", None)      # legacy UI field
+        or BLOB_CONTAINER_DEFAULT
+    )
+
+    # Vector collection drives RAG. Prefer explicit vector_collection, else fall back to legacy "container".
+    vector_collection = (
+        _extract_vector_collection_from_where(req.where)
+        or getattr(req, "vector_collection", None)
+        or getattr(req, "collection", None)
+        or getattr(req, "container", None)      # legacy UI field used as collection previously
+        or VECTOR_COLLECTION_DEFAULT
+    )
+
+    blob_container = (blob_container or "").strip()
+    vector_collection = (vector_collection or "").strip()
+
+    effective_corpus = (getattr(req, "corpus_id", None) or ACTIVE_CORPUS_ID).strip()
     mode_key = (getattr(req, "mode", None) or "").strip().lower() or None
 
     # IMPORTANT: resolve mode here so we fetch correct contexts for auto-routed ops/inventory
@@ -299,10 +341,11 @@ def post_chat(
     want_ops = (resolved_mode == "ops")
 
     logger.info(
-        "POST /chat (start) q_len=%d n_results=%d container=%s corpus_id=%s mode_key=%s resolved_mode=%s want_ops=%s",
+        "POST /chat (start) q_len=%d n_results=%d vector_collection=%s blob_container=%s corpus_id=%s mode_key=%s resolved_mode=%s want_ops=%s",
         len(question),
         req.n_results,
-        container,
+        vector_collection,
+        blob_container,
         effective_corpus,
         mode_key,
         resolved_mode,
@@ -314,13 +357,19 @@ def post_chat(
     stats_dict: Optional[Dict[str, Any]] = None
     delta_dict: Optional[Dict[str, Any]] = None
 
+    # ----------------------------
     # 1) Stats context (best-effort, never fail chat)
+    # ----------------------------
     if getattr(req, "stats_context", None):
         stats_context = req.stats_context
         logger.info("POST /chat stats_context provided by request (chars=%d)", len(stats_context or ""))
     else:
         try:
-            stats = stats_svc.get_stats(blob_container=container, corpus_id=effective_corpus)
+            stats = stats_svc.get_stats(
+                vector_collection=vector_collection,
+                corpus_id=effective_corpus,
+                blob_container=blob_container,  # optional enrichment
+            )
             stats_dict = _as_dict(stats)
             stats_context = _format_stats_context(stats_dict)
         except Exception as e:
@@ -328,10 +377,16 @@ def post_chat(
             stats_context = None
             stats_dict = None
 
+    # ----------------------------
     # 2) Delta + ops_context
+    # ----------------------------
     if want_ops:
         try:
-            delta = stats_svc.get_storage_index_delta(blob_container=container, corpus_id=effective_corpus)
+            delta = stats_svc.get_storage_index_delta(
+                vector_collection=vector_collection,
+                blob_container=blob_container,
+                corpus_id=effective_corpus,
+            )
             delta_dict = _as_dict(delta)
         except Exception as e:
             logger.warning("POST /chat delta fetch failed: %s", e, exc_info=True)
@@ -363,10 +418,12 @@ def post_chat(
     )
     logger.debug("ops_context preview (first 1200 chars):\n%s", (ops_context or "")[:1200])
 
+    # ----------------------------
     # 3) Ask chat service (ALWAYS)
+    # ----------------------------
     try:
         out: Dict[str, Any] = svc.ask(
-            container=container,
+            collection=vector_collection,  # ✅ container -> collection
             corpus_id=effective_corpus,
             mode=resolved_mode,
             question=question,
@@ -415,5 +472,4 @@ def post_chat(
         model=out.get("model"),
         usage=out.get("usage"),
     )
-
 

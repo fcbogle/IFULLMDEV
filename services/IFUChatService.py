@@ -12,8 +12,9 @@ from typing import Any, ClassVar, Dict, List, Optional
 from chat.OpenAIChat import OpenAIChat
 from services.IFUQueryService import IFUQueryService
 from services.IFUStatsService import IFUStatsService
-from settings import ACTIVE_CORPUS_ID
 from utility.logging_utils import get_class_logger
+
+from settings import VECTOR_COLLECTION_DEFAULT, ACTIVE_CORPUS_ID, ASK_DEFAULTS
 
 
 @dataclass
@@ -217,42 +218,62 @@ class IFUChatService:
     def ask(
             self,
             *,
-            container: str = "ifu-docs-test",
+            collection: Optional[str] = None,
             corpus_id: Optional[str] = None,
             mode: Optional[str] = None,
             question: str,
-            n_results: int = 5,
+            n_results: Optional[int] = None,
             where: Optional[Dict[str, Any]] = None,
-            temperature: float = 0.0,
-            max_tokens: int = 512,
+            temperature: Optional[float] = None,
+            max_tokens: Optional[int] = None,
             history: Optional[List[Dict[str, str]]] = None,
-            tone: str = "neutral",
-            language: str = "en",
+            tone: Optional[str] = None,
+            language: Optional[str] = None,
             stats_context: Optional[str] = None,
             ops_context: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """
+        Main chat entry point.
+
+        Key behaviours:
+        - Vector collection name is NOT a metadata filter; it is passed to query/stats services.
+        - Defaults are centralised in settings.py (.env controlled).
+        - Mode is resolved: ops > inventory > qa unless explicitly forced.
+        - QA path passes retrieved_sources into _build_messages so citation rules are satisfiable.
+        """
+
         q = (question or "").strip()
         if not q:
             raise ValueError("question must not be empty")
 
-        tone_key = (tone or "neutral").strip().lower()
+        # ----------------------------
+        # 1) Resolve env-backed defaults
+        # ----------------------------
+        vector_collection = (collection or VECTOR_COLLECTION_DEFAULT).strip()
+        effective_corpus = (corpus_id or ACTIVE_CORPUS_ID).strip()
+
+        effective_n_results = int(n_results if n_results is not None else ASK_DEFAULTS.get("n_results", 5))
+        effective_temperature = float(
+            temperature if temperature is not None else ASK_DEFAULTS.get("temperature", 0.0)
+        )
+        effective_max_tokens = int(max_tokens if max_tokens is not None else ASK_DEFAULTS.get("max_tokens", 512))
+
+        tone_key = (tone if tone is not None else ASK_DEFAULTS.get("tone", "neutral")).strip().lower()
         if tone_key not in self.TONE_PRESETS:
             self.logger.warning("ask: unknown tone='%s' -> defaulting to neutral", tone_key)
             tone_key = "neutral"
 
-        lang = (language or "en").strip().lower()
-        mode_key = (mode or "").strip().lower() or None
+        lang = (language if language is not None else ASK_DEFAULTS.get("language", "en")).strip().lower()
 
-        blob_container = (container or "ifu-docs-test").strip()
-        effective_corpus = (corpus_id or ACTIVE_CORPUS_ID).strip()
+        mode_key = (mode if mode is not None else ASK_DEFAULTS.get("mode", "")).strip().lower() or None
 
         self.logger.info(
-            "ask: mode=%s corpus=%s container=%s q_len=%d n_results=%d tone=%s lang=%s where=%s stats_ctx=%s ops_ctx=%s",
+            "ask: mode=%s corpus=%s collection=%s q_len=%d n_results=%d tone=%s lang=%s where=%s stats_ctx=%s ops_ctx=%s",
             mode_key,
             effective_corpus,
-            blob_container,
+            vector_collection,
             len(q),
-            n_results,
+            effective_n_results,
             tone_key,
             lang,
             "yes" if where else "no",
@@ -261,7 +282,7 @@ class IFUChatService:
         )
 
         # ----------------------------
-        # 0) Decide mode: ops vs inventory vs qa
+        # 2) Decide mode: ops vs inventory vs qa
         # ----------------------------
         force_inventory = mode_key == "inventory"
         force_qa = mode_key == "qa"
@@ -282,27 +303,30 @@ class IFUChatService:
             auto_inventory = bool(self._is_inventory_question(ql))
             auto_ops = bool(self._is_ops_question(ql))
 
-            per_doc_intent = any(p in ql for p in [
-                "inventory",
-                "list indexed",
-                "which documents are indexed",
-                "indexed document",
-                "each document",
-                "every document",
-                "focuses on",
-                "summary of each",
-                "summarise each",
-                "summarize each",
-                "sample chunks",
-                "excerpts",
-                "document map",
-                "chunk count",
-                "chunks indexed",
-                "number of chunks",
-                "how many chunks",
-                "d1",
-                "d2",
-            ])
+            per_doc_intent = any(
+                p in ql
+                for p in [
+                    "inventory",
+                    "list indexed",
+                    "which documents are indexed",
+                    "indexed document",
+                    "each document",
+                    "every document",
+                    "focuses on",
+                    "summary of each",
+                    "summarise each",
+                    "summarize each",
+                    "sample chunks",
+                    "excerpts",
+                    "document map",
+                    "chunk count",
+                    "chunks indexed",
+                    "number of chunks",
+                    "how many chunks",
+                    "d1",
+                    "d2",
+                ]
+            )
 
             # If both match, prefer inventory for per-document intent
             if auto_ops and auto_inventory and per_doc_intent:
@@ -327,23 +351,22 @@ class IFUChatService:
         )
 
         # ----------------------------
-        # INVENTORY PATH
+        # 3) INVENTORY PATH
         # ----------------------------
         if resolved_mode == "inventory":
             lang_filter = (lang or "").strip().lower() or None
 
-            # 1) Get doc-level stats (this is where chunk_count lives)
+            # Doc-level stats (chunk_count lives here)
             stats = self.stats_service.get_stats(
-                blob_container=blob_container,
+                vector_collection=vector_collection,
                 corpus_id=effective_corpus,
             )
             stats_dict = stats.model_dump() if hasattr(stats, "model_dump") else stats
             docs = (stats_dict.get("documents") or [])
 
-            # Optional: keep samples for “describe each doc” questions
-            lang_filter = (lang or "").strip().lower() or None
+            # Optional: samples for "describe each doc" questions
             samples = self.stats_service.get_indexed_doc_samples(
-                blob_container=blob_container,
+                vector_collection=vector_collection,
                 corpus_id=effective_corpus,
                 lang=lang_filter,
                 max_docs=25,
@@ -364,8 +387,8 @@ class IFUChatService:
 
             resp = self.chat_client.chat(
                 messages=messages,
-                temperature=float(temperature),
-                max_tokens=int(max_tokens),
+                temperature=effective_temperature,
+                max_tokens=effective_max_tokens,
             )
             answer = (resp.choices[0].message.content or "").strip()
             usage = getattr(resp, "usage", None)
@@ -374,21 +397,21 @@ class IFUChatService:
             return {
                 "mode": "inventory",
                 "corpus_id": effective_corpus,
+                "collection": vector_collection,
                 "question": q,
                 "answer": answer,
-                "n_results": n_results,
+                "n_results": effective_n_results,
                 "sources": [],
                 "samples": samples,
                 "tone": tone_key,
                 "language": lang,
                 "model": model,
                 "usage": usage.model_dump() if hasattr(usage, "model_dump") else (
-                    usage if isinstance(usage, dict) else None
-                ),
+                    usage if isinstance(usage, dict) else None),
             }
 
         # ----------------------------
-        # OPS PATH
+        # 4) OPS PATH
         # ----------------------------
         if resolved_mode == "ops":
             messages = self._build_ops_messages(
@@ -401,8 +424,8 @@ class IFUChatService:
 
             resp = self.chat_client.chat(
                 messages=messages,
-                temperature=float(temperature),
-                max_tokens=int(max_tokens),
+                temperature=effective_temperature,
+                max_tokens=effective_max_tokens,
             )
             answer = (resp.choices[0].message.content or "").strip()
             usage = getattr(resp, "usage", None)
@@ -411,29 +434,30 @@ class IFUChatService:
             return {
                 "mode": "ops",
                 "corpus_id": effective_corpus,
+                "collection": vector_collection,
                 "question": q,
                 "answer": answer,
-                "n_results": n_results,
+                "n_results": effective_n_results,
                 "sources": [],
                 "tone": tone_key,
                 "language": lang,
                 "model": model,
                 "usage": usage.model_dump() if hasattr(usage, "model_dump") else (
-                    usage if isinstance(usage, dict) else None
-                ),
+                    usage if isinstance(usage, dict) else None),
             }
 
         # ----------------------------
-        # QA PATH
+        # 5) QA PATH
         # ----------------------------
+        # Merge caller filters with enforced corpus/lang
         merged_filters: Dict[str, Any] = dict(where or {})
         merged_filters.setdefault("corpus_id", effective_corpus)
-        merged_filters.setdefault("container", blob_container)
 
         # enforce retrieval language only if caller didn't specify it
         if "lang" not in merged_filters and lang:
             merged_filters["lang"] = lang
 
+        # Build retrieval_where in a stable way
         if len(merged_filters) == 1:
             retrieval_where = merged_filters
         elif "$and" in merged_filters or "$or" in merged_filters:
@@ -441,7 +465,13 @@ class IFUChatService:
         else:
             retrieval_where = {"$and": [{k: v} for k, v in merged_filters.items()]}
 
-        raw = self.query_service.query(query_text=q, n_results=n_results, where=retrieval_where)
+        # IMPORTANT: collection is NOT a metadata filter; it selects the vector namespace
+        raw = self.query_service.query(
+            collection=vector_collection,  # <-- ensure IFUQueryService.query supports this
+            query_text=q,
+            n_results=effective_n_results,
+            where=retrieval_where,
+        )
         hits = self.query_service.to_hits(raw, include_text=True, include_scores=True, include_metadata=True)
         self.logger.info("ask: retrieved_hits=%d", len(hits))
 
@@ -454,12 +484,13 @@ class IFUChatService:
             tone=tone_key,
             language=lang,
             stats_context=stats_context,
+            retrieved_sources=hits,  # <-- so citations can be produced
         )
 
         resp = self.chat_client.chat(
             messages=messages,
-            temperature=float(temperature),
-            max_tokens=int(max_tokens),
+            temperature=effective_temperature,
+            max_tokens=effective_max_tokens,
         )
         answer = (resp.choices[0].message.content or "").strip()
         usage = getattr(resp, "usage", None)
@@ -468,16 +499,16 @@ class IFUChatService:
         return {
             "mode": "qa",
             "corpus_id": effective_corpus,
+            "collection": vector_collection,
             "question": q,
             "answer": answer,
-            "n_results": n_results,
+            "n_results": effective_n_results,
             "sources": hits,
             "tone": tone_key,
             "language": lang,
             "model": model,
             "usage": usage.model_dump() if hasattr(usage, "model_dump") else (
-                usage if isinstance(usage, dict) else None
-            ),
+                usage if isinstance(usage, dict) else None),
         }
 
     # ----------------------------

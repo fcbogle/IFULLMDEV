@@ -17,6 +17,8 @@ from utility.logging_utils import get_class_logger
 
 REQUIRED_BLOB_META_KEYS = ["document_type"]
 
+from settings import BLOB_CONTAINER_DEFAULT
+
 
 def _norm_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, str]:
     """
@@ -40,7 +42,11 @@ class IFUBlobService:
     def __post_init__(self) -> None:
         self.logger = self.logger or get_class_logger(self.__class__)
 
+    def _resolve_container(self, container: Optional[str]) -> str:
+        return (container or BLOB_CONTAINER_DEFAULT).strip()
+
     def list_blobs(self, *, container: str, prefix: str = "") -> List[Dict[str, Any]]:
+        container = self._resolve_container(container)
         self.logger.info("list_blobs: container='%s' prefix='%s' (start)", container, prefix)
         try:
             cc = self.file_loader.blob_service.get_container_client(container)
@@ -85,6 +91,7 @@ class IFUBlobService:
         """
         Returns list of {blob_name, size, content_type, last_modified, blob_metadata}.
         """
+        container = self._resolve_container(container)
         self.logger.info("get_blob_details: container='%s' prefix='%s' (start)", container, prefix)
         out: List[Dict[str, Any]] = []
         cc = self.file_loader.blob_service.get_container_client(container)
@@ -132,6 +139,7 @@ class IFUBlobService:
             raise
 
     def get_blob_metadata(self, *, container: str, blob_name: str) -> Dict[str, str]:
+        container = self._resolve_container(container)
         self.logger.info("get_blob_metadata: container='%s' blob='%s' (start)", container, blob_name)
         try:
             bc = self.file_loader.blob_service.get_blob_client(container, blob_name)
@@ -150,6 +158,7 @@ class IFUBlobService:
         """
         Overwrites metadata (Azure semantics). If you want merge semantics, do it in the router/service.
         """
+        container = self._resolve_container(container)
         norm = _norm_meta(metadata)
         self.logger.info(
             "set_blob_metadata: container='%s' blob='%s' keys=%d (start)",
@@ -168,6 +177,7 @@ class IFUBlobService:
             raise
 
     def delete_blob(self, *, container: str, blob_name: str) -> bool:
+        container = self._resolve_container(container)
         self.logger.info("delete_blob: container='%s' blob='%s' (start)", container, blob_name)
         try:
             bc = self.file_loader.blob_service.get_blob_client(container, blob_name)
@@ -189,6 +199,7 @@ class IFUBlobService:
             files: List[UploadFile],
             default_metadata: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
+        container = self._resolve_container(container)
         self.logger.info(
             "upload_files: container='%s' prefix='%s' files=%d (start)",
             container, blob_prefix, len(files)

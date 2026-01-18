@@ -9,7 +9,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Iterable, Optional
 
 from config.Config import Config
 from chunking.IFUChunker import IFUChunker
@@ -20,7 +20,7 @@ from loader.IFUDocumentLoader import IFUDocumentLoader
 from utility.logging_utils import get_class_logger
 from vectorstore.IFUVectorStore import IFUVectorStore
 
-from settings import ACTIVE_CORPUS_ID
+from settings import BLOB_CONTAINER_DEFAULT, VECTOR_COLLECTION_DEFAULT, ACTIVE_CORPUS_ID
 
 class IFUIngestService:
     """
@@ -40,7 +40,7 @@ class IFUIngestService:
             embedder: IFUEmbedder,
             chunker: IFUChunker,
             extractor: IFUTextExtractor,
-            collection_name: str,
+            collection_name: str | None = None,
             logger: logging.Logger | None = None,
     ) -> None:
         self.document_loader = document_loader
@@ -48,7 +48,7 @@ class IFUIngestService:
         self.embedder = embedder
         self.chunker = chunker
         self.extractor = extractor
-        self.collection_name = collection_name
+        self.collection_name = (collection_name or VECTOR_COLLECTION_DEFAULT).strip()
         self.logger = logger or get_class_logger(self.__class__)
 
 
@@ -70,15 +70,14 @@ class IFUIngestService:
             cfg=cfg,
         )
 
-    from typing import Any, Dict, Iterable, Optional
-
     def ingest_blob_pdfs(
             self,
             blob_names: Iterable[str],
             *,
-            container: str,
+            container: str | None = None,
             document_type: str = "IFU",
     ) -> Dict[str, Any]:
+        container = (container or BLOB_CONTAINER_DEFAULT).strip()
         blob_list = list(blob_names)
 
         ingested = 0
@@ -164,11 +163,13 @@ class IFUIngestService:
     def _process_single_blob_pdf(
             self,
             *,
-            container: str,
+            container: str | None = None,
             blob_name: str,
             document_type: str,
             pdf_bytes: Optional[bytes] = None,
             source_path: Optional[Path] = None,) -> None:
+
+        container = (container or BLOB_CONTAINER_DEFAULT).strip()
 
         self.logger.info(
             "Processing blob '%s' from container '%s' into collection '%s'",

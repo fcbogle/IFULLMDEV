@@ -19,6 +19,8 @@ from services.IFUQueryService import IFUQueryService
 from services.IFUStatsService import IFUStatsService
 from vectorstore.ChromaIFUVectorStore import ChromaIFUVectorStore
 
+from settings import VECTOR_COLLECTION_DEFAULT
+
 
 class AppContainer:
     """
@@ -30,7 +32,7 @@ class AppContainer:
         # Configuration
         self.cfg = Config.from_env()
 
-        self.collection_name = "ifu-docs-test"
+        self.collection_name = VECTOR_COLLECTION_DEFAULT
 
         # Smoke tests / health
         self.test_runner = TestRunner(cfg=self.cfg)
@@ -57,20 +59,19 @@ class AppContainer:
             embedder=self.embedder,
             chunker=self.chunker,
             extractor=self.extractor,
-            collection_name="ifu-docs-test",
+            collection_name=self.collection_name,
         )
 
         # Return a singleton IFUStatsService instance
         self.stats_service = IFUStatsService(
-            vector_store=self.store,  # ✅ rename kwarg
-            document_loader=self.document_loader,
-            collection_name=self.collection_name,
+            vector_store=self.store,
+            document_loader=self.document_loader
         )
 
         # Return a singleton IFUQueryService instance
         self.query_service = IFUQueryService(
             store=self.store,
-            collection_name="ifu-docs-test",
+            collection_name=self.collection_name,
         )
 
         self.openai_chat = OpenAIChat(cfg=self.cfg)

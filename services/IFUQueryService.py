@@ -3,29 +3,46 @@
 # Created: 2025-12-20
 # Description: IFUQueryService
 # -----------------------------------------------------------------------------
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-@dataclass
+
 class IFUQueryService:
-    store: Any  # your IFUVectorStore / ChromaIFUVectorStore
-    collection_name: str = "ifu-docs-test"
+    def __init__(self, *, store, collection_name: str):
+        self.store = store
+        self.collection_name = (collection_name or "").strip()
 
     def query(
         self,
+        *,
         query_text: str,
         n_results: int = 5,
         where: Optional[Dict[str, Any]] = None,
+        collection: Optional[str] = None,
     ) -> Dict[str, Any]:
-        # Delegate to a vector store; this should embed a query and call Chroma
-        return self.store.query_text(query_text=query_text, n_results=n_results, where=where)
+        """
+        Query vector store.
+
+        `collection` selects the vector collection at runtime.
+        If not provided, defaults to `self.collection_name` for backward compatibility.
+        """
+        effective_collection = (collection or self.collection_name or "").strip()
+        if not effective_collection:
+            raise ValueError("collection resolved to empty value")
+
+        return self.store.query(
+            collection=effective_collection,
+            query_text=query_text,
+            n_results=int(n_results),
+            where=where,
+        )
 
     @staticmethod
     def to_hits(
-            raw: Dict[str, Any],
-            include_text: bool = True,
-            include_scores: bool = True,
-            include_metadata: bool = True,
+        raw: Dict[str, Any],
+        include_text: bool = True,
+        include_scores: bool = True,
+        include_metadata: bool = True,
+        include_distances: bool = True,
     ) -> List[Dict[str, Any]]:
         ids = (raw.get("ids") or [[]])
         docs = (raw.get("documents") or [[]])
@@ -40,7 +57,6 @@ class IFUQueryService:
         hits: List[Dict[str, Any]] = []
 
         def _pick_page(md: Dict[str, Any]) -> Optional[int]:
-            # prefer an explicit "page" if present, else fall back
             for k in ("page", "page_start", "page_end"):
                 v = md.get(k)
                 if isinstance(v, int):
@@ -64,12 +80,19 @@ class IFUQueryService:
                 "doc_id": doc_id,
                 "page": page,
             }
+
             if include_text:
                 hit["text"] = text
-            if include_scores:
-                hit["score"] = float(dist) if dist is not None else None
+
             if include_metadata:
                 hit["metadata"] = md if isinstance(md, dict) else None
+
+            if include_distances:
+                hit["distance"] = float(dist) if dist is not None else None
+
+            if include_scores:
+                # higher-is-better similarity score (monotonic transform of distance)
+                hit["score"] = (1.0 / (1.0 + float(dist))) if dist is not None else None
 
             hits.append(hit)
 
