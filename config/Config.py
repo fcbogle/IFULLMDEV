@@ -53,7 +53,7 @@ class Config:
         "storage_key": "AZURE_STORAGE_KEY",
 
         # OpenAI direct
-        "openai_base_url": "OPENAI_BASE_URL",      # e.g. https://api.openai.com/v1
+        "openai_base_url": "OPENAI_BASE_URL",
         "openai_api_key": "OPENAI_API_KEY",
         "openai_chat_model": "OPENAI_CHAT_MODEL",
 
@@ -71,8 +71,6 @@ class Config:
         # Chunking
         "ifu_chunk_size_tokens": "IFU_CHUNK_SIZE_TOKENS",
         "ifu_overlap_tokens": "IFU_OVERLAP_TOKENS",
-
-
     }
 
     # Convenient *groups* for use in tests / health checks

@@ -125,7 +125,7 @@ def _run_ingest_job(
         job["failed"] = int(job.get("failed", 0)) + 1
 
     finally:
-        # ✅ Always finalise so new jobs can start
+        # Always finalise so new jobs can start
         job["status"] = "done_with_errors" if int(job.get("failed", 0)) else "done"
         job["finished_at"] = _utc_now()
         job["updated_at"] = _utc_now()

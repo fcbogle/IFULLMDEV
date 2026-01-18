@@ -11,7 +11,8 @@ from fastapi import APIRouter, Depends, Query
 from api.dependencies import get_stats_service
 from api.schemas.ifu_stats import IFUStatsResponse
 from services.IFUStatsService import IFUStatsService
-from settings import ACTIVE_CORPUS_ID
+
+from settings import ACTIVE_CORPUS_ID, BLOB_CONTAINER_DEFAULT
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ def get_ifu_stats(
     blob_container: str = Query("ifu-docs-test"),
     corpus_id: Optional[str] = Query(default=None),
 ) -> IFUStatsResponse:
-    effective_corpus = corpus_id or ACTIVE_CORPUS_ID
+    effective_corpus = (corpus_id or ACTIVE_CORPUS_ID).strip()
     logger.info(
         "Getting stats for blob_container='%s' corpus_id='%s'",
         blob_container,
@@ -36,7 +37,7 @@ def get_ifu_stats(
 @router.get("/samples")
 def get_ifu_samples(
     svc: IFUStatsService = Depends(get_stats_service),
-    blob_container: str = Query("ifu-docs-test"),
+    blob_container: str = Query(BLOB_CONTAINER_DEFAULT),
     corpus_id: Optional[str] = Query(default=None),
     lang: Optional[str] = Query(default=None),
     max_docs: int = Query(10, ge=1, le=50),
@@ -63,7 +64,7 @@ def get_ifu_samples(
 @router.get("/delta")
 def get_ifu_delta(
     svc: IFUStatsService = Depends(get_stats_service),
-    blob_container: str = Query("ifu-docs-test"),
+    blob_container: str = Query(BLOB_CONTAINER_DEFAULT),
     corpus_id: Optional[str] = Query(default=None),
 ):
     effective_corpus = corpus_id or ACTIVE_CORPUS_ID

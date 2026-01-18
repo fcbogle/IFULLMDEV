@@ -14,9 +14,8 @@ from api.dependencies import get_chat_service, get_stats_service
 from api.schemas.chat import ChatResponse, ChatRequest, ChatSource
 from services.IFUChatService import IFUChatService
 from services.IFUStatsService import IFUStatsService
-from settings import ACTIVE_CORPUS_ID
 
-DEFAULT_BLOB_CONTAINER = "default-container"
+from settings import ACTIVE_CORPUS_ID, BLOB_CONTAINER_DEFAULT
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -291,7 +290,7 @@ def post_chat(
     if not question:
         raise HTTPException(status_code=400, detail="question must not be empty")
 
-    container = _extract_container_from_where(req.where) or getattr(req, "container", None) or DEFAULT_BLOB_CONTAINER
+    container = _extract_container_from_where(req.where) or getattr(req, "container", None) or BLOB_CONTAINER_DEFAULT
     effective_corpus = getattr(req, "corpus_id", None) or ACTIVE_CORPUS_ID
     mode_key = (getattr(req, "mode", None) or "").strip().lower() or None
 
@@ -369,7 +368,7 @@ def post_chat(
         out: Dict[str, Any] = svc.ask(
             container=container,
             corpus_id=effective_corpus,
-            mode=resolved_mode,  # ✅ IMPORTANT: enforce router resolution
+            mode=resolved_mode,
             question=question,
             n_results=req.n_results,
             where=req.where,
